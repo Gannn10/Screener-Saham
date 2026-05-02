@@ -2,13 +2,16 @@ name: BSJP Auto Screener
 
 on:
   schedule:
-    # Jam 08:20 UTC = 15:20 WIB (UTC+7)
+    # ── Screener sore: jam 08:20 UTC = 15:20 WIB ──
     - cron: '20 8 * * 1-5'
-  # Bisa juga dijalankan manual dari GitHub
+    # ── Tracker pagi: jam 02:30 UTC = 09:30 WIB ──
+    - cron: '30 2 * * 2-6'
   workflow_dispatch:
 
 jobs:
   screening:
+    # Jalankan screener sore (jam 08:20 UTC)
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '20 8 * * 1-5'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -31,3 +34,53 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python bsjp_auto.py
+
+      # Simpan file CSV hasil sebagai artifact
+      # supaya bisa dibaca oleh tracker besok pagi
+      - name: Upload hasil CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: hasil-screener
+          path: bsjp_hasil_*.csv
+          retention-days: 2
+
+  tracking:
+    # Jalankan tracker pagi (jam 02:30 UTC = 09:30 WIB)
+    if: github.event.schedule == '30 2 * * 2-6'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install library
+        run: |
+          pip install yfinance pandas numpy requests
+
+      # Download CSV hasil screener kemarin
+      - name: Download hasil screener kemarin
+        uses: actions/download-artifact@v4
+        with:
+          name: hasil-screener
+        continue-on-error: true
+
+      - name: Jalankan Morning Tracker
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python bsjp_tracker.py
+
+      # Simpan hasil tracking
+      - name: Upload hasil tracking
+        uses: actions/upload-artifact@v4
+        with:
+          name: hasil-tracking
+          path: bsjp_tracking_*.csv
+          retention-days: 30
