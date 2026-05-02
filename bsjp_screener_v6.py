@@ -1259,7 +1259,14 @@ def analisis_saham(ticker, mode):
     if rsi > rsi_max or rsi < CONFIG["RSI_MIN"]: return None
     if vspike < vs_min * 0.5:                    return None
     if mode == "safe" and chg > CONFIG["SAFE_CHG_MAX"]: return None
-    if mode == "safe" and macd["status"] == "BEARISH_STRONG": return None
+
+    # ── Filter MACD ────────────────────────────────────────────
+    # SAFE   : tolak semua bearish (kuat maupun biasa)
+    # NORMAL : tolak bearish kuat saja — FIX kasus BUMI!
+    # AGGR   : tidak ada filter MACD (semua boleh masuk)
+    if mode == "safe"   and macd["status"] in ("BEARISH", "BEARISH_STRONG"): return None
+    if mode == "normal" and macd["status"] == "BEARISH_STRONG":              return None
+
     if mode in ("safe", "normal") and vol_arah["distribusi_hari_ini"]: return None
     if mode == "safe" and not vol_arah["aman"]: return None
 
