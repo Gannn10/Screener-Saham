@@ -38,7 +38,7 @@ except ImportError as e:
 # Import screener v6
 spec = importlib.util.spec_from_file_location(
     "screener",
-    os.path.join(os.path.dirname(__file__), "bsjp_screener_v6.py")
+    os.path.join(os.path.dirname(__file__), "bsjp_bot.py")
 )
 screener = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(screener)
