@@ -6,7 +6,7 @@ Project ini dirancang untuk mempermudah analisis data pergerakan saham harian da
 
 ## 🚀 Fitur Utama
 
-* **Screener Otomatis (`bsjp_screener_v6.py`)**: Melakukan *screening* pada saham-saham potensial menjelang penutupan pasar untuk menemukan kandidat BSJP terbaik berdasarkan algoritma/rumus v6.
+* **Screener Otomatis (`bsjp_auto.py`)**: Melakukan *screening* pada saham-saham potensial menjelang penutupan pasar untuk menemukan kandidat BSJP terbaik berdasarkan algoritma/rumus v6.
 * **Tracker Portofolio & Harga (`bsjp_tracker.py`)**: Memantau pergerakan harga saham-saham yang masuk radar atau sudah dibeli untuk menentukan momentum *Take Profit* (TP) atau *Stop Loss* (SL) di pagi hari.
 * **Auto-Execution (`bsjp_auto.py`)**: Script utama untuk menjalankan alur otomatisasi harian.
 * **GitHub Actions Integration (`.github/workflows/bsjp.yml`)**: Workflow CI/CD yang dikonfigurasi untuk menjalankan *screener* dan *tracker* secara berkala (Cron Job) tanpa harus menyalakan komputer/server lokal.
