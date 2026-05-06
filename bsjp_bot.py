@@ -1,19 +1,21 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║           BSJP SCREENER v6.0 — IHSG                         ║
-║       Beli Sore Jual Pagi — by Claude (Anthropic)           ║
+║        BSJP TELEGRAM BOT — IHSG Interactive Screener        ║
 ║                                                              ║
-║  UPDATE v6.0:                                                ║
-║  + Sentiment Berita AI (scrape IDX + analisis Claude AI)     ║
-║  + Notifikasi Telegram otomatis                              ║
-║  + Auto-scheduler jam 15.15 WIB setiap hari                 ║
-║  + Tidak perlu buka laptop — hasil langsung ke HP!           ║
+║  COMMANDS:                                                   ║
+║  /start      → Sapa + menu lengkap                          ║
+║  /scan       → Scan mode Normal (default)                   ║
+║  /scan safe  → Scan mode Safe (konservatif)                 ║
+║  /scan normal→ Scan mode Normal                             ║
+║  /scan agr   → Scan mode Aggressive                         ║
+║  /scan all   → Scan semua mode + global picks               ║
+║  /status     → Cek status bot & jam bursa                   ║
+║  /help       → Panduan lengkap                              ║
 ║                                                              ║
-║  SETUP PERTAMA KALI:                                         ║
-║  1. pip install yfinance pandas numpy colorama               ║
-║       requests schedule beautifulsoup4                       ║
-║  2. Isi TELEGRAM_TOKEN & TELEGRAM_CHAT_ID di CONFIG          ║
-║  3. python bsjp_screener_v6.py → pilih mode 5 (auto)        ║
+║  SETUP:                                                      ║
+║  pip install yfinance pandas numpy colorama                  ║
+║       requests beautifulsoup4                                ║
+║  python bsjp_bot.py                                          ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -133,7 +135,8 @@ WATCHLIST = list(dict.fromkeys([
 CONFIG = {
     "SAFE_VSPIKE_MIN": 150, "NORMAL_VSPIKE_MIN": 100, "AGGRESSIVE_VSPIKE_MIN": 50,
     "SAFE_RSI_MAX": 60,     "NORMAL_RSI_MAX": 65,     "AGGRESSIVE_RSI_MAX": 70,
-    "RSI_MIN": 30,          "CHG_MIN": 1.0,           "SAFE_CHG_MAX": 15.0,
+    "RSI_MIN": 30,          "CHG_MIN": 1.0,           "SAFE_CHG_MAX": 12.0,
+    "NORMAL_CHG_MAX": 15.0,  # Filter pump — saham naik >15% skip (profit taking!)
     "VOL_AVG_PERIOD": 20,   "RSI_PERIOD": 14,         "ATR_PERIOD": 14,
     "MACD_FAST": 12,        "MACD_SLOW": 26,          "MACD_SIGNAL": 9,
     "BB_PERIOD": 20,        "BB_STD": 2.0,
@@ -1258,8 +1261,16 @@ def analisis_saham(ticker, mode):
 
     if rsi > rsi_max or rsi < CONFIG["RSI_MIN"]: return None
     if vspike < vs_min * 0.5:                    return None
-    if mode == "safe" and chg > CONFIG["SAFE_CHG_MAX"]: return None
-    if mode == "safe" and macd["status"] == "BEARISH_STRONG": return None
+    if mode == "safe"   and chg > CONFIG["SAFE_CHG_MAX"]:   return None
+    if mode == "normal" and chg > CONFIG["NORMAL_CHG_MAX"]: return None
+
+    # ── Filter MACD (FIXED) ────────────────────────────────────
+    # SAFE   : tolak BEARISH dan BEARISH_STRONG
+    # NORMAL : tolak BEARISH_STRONG saja
+    # AGGR   : tidak ada filter MACD
+    if mode == "safe"   and macd["status"] in ("BEARISH","BEARISH_STRONG"): return None
+    if mode == "normal" and macd["status"] == "BEARISH_STRONG":             return None
+
     if mode in ("safe", "normal") and vol_arah["distribusi_hari_ini"]: return None
     if mode == "safe" and not vol_arah["aman"]: return None
 
@@ -1733,9 +1744,315 @@ def main():
             pass
 
 
-if __name__ == "__main__":
+# ═══════════════════════════════════════════════════════════════
+# TELEGRAM BOT ENGINE — Long Polling
+# ═══════════════════════════════════════════════════════════════
+
+BOT_COMMANDS = """
+🤖 <b>BSJP Bot — Daftar Command</b>
+
+/scan         → Scan mode Normal
+/scan safe    → Scan konservatif
+/scan normal  → Scan seimbang
+/scan agr     → Scan agresif
+/scan all     → Semua mode + global picks
+/status       → Status bot & jam bursa
+/help         → Panduan ini
+"""
+
+PESAN_SAMBUTAN = """
+👋 Halo! Saya <b>BSJP Bot</b> — screener saham IHSG otomatis.
+
+Ketik /scan untuk langsung scan saham hari ini!
+Atau ketik /help untuk melihat semua command.
+
+⏰ Auto-scan jalan setiap hari jam <b>15.20 WIB</b>
+"""
+
+
+def bot_get_updates(offset: int = 0) -> list:
+    """Ambil pesan baru dari Telegram (long polling)"""
+    token = CONFIG["TELEGRAM_TOKEN"]
     try:
-        main()
-    except KeyboardInterrupt:
-        print(f"\n\n  {Fore.YELLOW}Screener dihentikan.{Style.RESET_ALL}\n")
-        sys.exit(0)
+        r = requests.get(
+            f"https://api.telegram.org/bot{token}/getUpdates",
+            params={"offset": offset, "timeout": 30},
+            timeout=35
+        )
+        if r.status_code == 200:
+            return r.json().get("result", [])
+    except Exception:
+        pass
+    return []
+
+
+def bot_kirim(chat_id: str, pesan: str):
+    """Kirim pesan ke chat tertentu"""
+    token = CONFIG["TELEGRAM_TOKEN"]
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": pesan,
+                  "parse_mode": "HTML",
+                  "disable_web_page_preview": True},
+            timeout=10
+        )
+    except Exception as e:
+        print(f"  Kirim error: {e}")
+
+
+def bot_kirim_typing(chat_id: str):
+    """Kirim indikator 'sedang mengetik'"""
+    token = CONFIG["TELEGRAM_TOKEN"]
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendChatAction",
+            data={"chat_id": chat_id, "action": "typing"},
+            timeout=5
+        )
+    except Exception:
+        pass
+
+
+def jalankan_scan_bot(chat_id: str, mode: str):
+    """
+    Handler /scan — jalankan screener dan kirim hasil ke chat
+    Dipanggil saat user ketik /scan, /scan safe, dll
+    """
+    mode_label = {
+        "safe": "SAFE 🟢", "normal": "NORMAL 🟡",
+        "aggressive": "AGGRESSIVE 🔴"
+    }.get(mode, "NORMAL 🟡")
+
+    # Notif mulai scanning
+    bot_kirim(chat_id,
+        f"🔍 <b>Scanning mode {mode_label}...</b>\n"
+        f"Menganalisis {len(WATCHLIST)} saham IHSG\n"
+        f"<i>Tunggu ~1-2 menit ya...</i>"
+    )
+    bot_kirim_typing(chat_id)
+
+    # Scan
+    results = []
+    for ticker in WATCHLIST:
+        try:
+            r = analisis_saham(ticker, mode)
+            if r:
+                results.append(r)
+        except Exception:
+            pass
+        time.sleep(CONFIG["REQUEST_DELAY"])
+
+    if not results:
+        bot_kirim(chat_id,
+            f"⚠️ <b>Tidak ada saham lolos filter</b>\n"
+            f"Mode: {mode_label}\n\n"
+            f"Coba /scan agr untuk mode lebih longgar."
+        )
+        return
+
+    # Ambil sentimen top 3
+    sentimen_cache = {}
+    top3 = sorted(results, key=lambda x: x["score"], reverse=True)[:3]
+    for r in top3:
+        try:
+            sentimen_cache[r["ticker"]] = ambil_sentimen(r["ticker"])
+            time.sleep(1)
+        except Exception:
+            pass
+
+    # Kirim hasil
+    pesan = format_pesan_telegram(results, mode, sentimen_cache)
+    bot_kirim(chat_id, pesan)
+
+    # Kirim ringkasan sektor
+    sektor_count = {}
+    for r in results:
+        s = r["sektor"]
+        sektor_count[s] = sektor_count.get(s, 0) + 1
+    if len(sektor_count) > 1:
+        sektor_sort = sorted(sektor_count.items(), key=lambda x: x[1], reverse=True)
+        sektor_txt  = "\n".join([f"  {s}: {c} saham" for s, c in sektor_sort[:5]])
+        bot_kirim(chat_id,
+            f"🏦 <b>Ringkasan Sektor</b>\n\n{sektor_txt}\n\n"
+            f"<i>Total {len(results)} saham lolos dari {len(WATCHLIST)} watchlist</i>"
+        )
+
+
+def jalankan_scan_all_bot(chat_id: str):
+    """Handler /scan all — semua mode + global picks"""
+    bot_kirim(chat_id,
+        f"🔍 <b>Scanning ALL MODES...</b>\n"
+        f"Safe + Normal + Aggressive\n"
+        f"<i>Proses lebih lama ~3-5 menit...</i>"
+    )
+
+    all_res      = {}
+    ticker_count = {}
+
+    for mode in ["safe", "normal", "aggressive"]:
+        results = []
+        for ticker in WATCHLIST:
+            try:
+                r = analisis_saham(ticker, mode)
+                if r:
+                    results.append(r)
+                    ticker_count[ticker] = ticker_count.get(ticker, 0) + 1
+            except Exception:
+                pass
+            time.sleep(CONFIG["REQUEST_DELAY"])
+        all_res[mode] = results
+
+        # Kirim hasil per mode
+        pesan_mode = format_pesan_telegram(results, mode, {})
+        bot_kirim(chat_id, pesan_mode)
+        time.sleep(1)
+
+    # Global picks
+    gp = [t for t, c in ticker_count.items() if c >= 3]
+    if gp:
+        norm = {r["ticker"]: r for r in all_res.get("normal", [])}
+        baris = ["🌟 <b>GLOBAL PICKS — Muncul di semua 3 mode!</b>\n"]
+        for t in gp:
+            r = norm.get(t)
+            if r:
+                baris.append(
+                    f"⭐ <b>{t}</b> [{r['sektor']}]  Score:{r['score']}\n"
+                    f"   Close:{fmt_h(r['close'])}  Chg:{r['chg']:+.2f}%\n"
+                    f"   {r['macd']['label']} | {r['bb']['label']}\n"
+                )
+        bot_kirim(chat_id, "\n".join(baris))
+    else:
+        bot_kirim(chat_id, "ℹ️ Tidak ada saham yang muncul di ketiga mode sekaligus.")
+
+
+def cmd_status(chat_id: str):
+    """Handler /status — info jam bursa & bot"""
+    wt  = cek_waktu_scan()
+    jam = datetime.now().strftime("%H:%M WIB")
+
+    if wt["aman"]:
+        bursa_status = "✅ Harga close FINAL — waktu ideal scan!"
+    else:
+        bursa_status = f"⏰ {wt['label']}"
+
+    bot_kirim(chat_id,
+        f"📡 <b>Status BSJP Bot</b>\n\n"
+        f"🕐 Jam sekarang : {jam}\n"
+        f"📈 Bursa        : {bursa_status}\n"
+        f"📋 Watchlist    : {len(WATCHLIST)} saham\n"
+        f"⏰ Auto-scan    : {CONFIG['JADWAL_JAM']} WIB\n\n"
+        f"Ketik /scan untuk mulai screening!"
+    )
+
+
+def proses_command(chat_id: str, teks: str, nama: str):
+    """
+    Router command — arahkan ke handler yang tepat
+    """
+    teks  = teks.strip().lower()
+    parts = teks.split()
+    cmd   = parts[0] if parts else ""
+
+    print(f"  [{datetime.now().strftime('%H:%M:%S')}] {nama}: {teks}")
+
+    if cmd == "/start":
+        bot_kirim(chat_id, PESAN_SAMBUTAN + BOT_COMMANDS)
+
+    elif cmd == "/help":
+        bot_kirim(chat_id, BOT_COMMANDS)
+
+    elif cmd == "/status":
+        cmd_status(chat_id)
+
+    elif cmd == "/scan":
+        arg = parts[1] if len(parts) > 1 else "normal"
+
+        if arg == "all":
+            jalankan_scan_all_bot(chat_id)
+        elif arg in ("safe", "s"):
+            jalankan_scan_bot(chat_id, "safe")
+        elif arg in ("agr", "aggressive", "a"):
+            jalankan_scan_bot(chat_id, "aggressive")
+        else:
+            jalankan_scan_bot(chat_id, "normal")
+
+    else:
+        bot_kirim(chat_id,
+            f"❓ Command tidak dikenal: <code>{teks}</code>\n\n"
+            f"Ketik /help untuk daftar command."
+        )
+
+
+def jalankan_bot():
+    """
+    Loop utama bot — long polling Telegram
+    Jalan terus menunggu pesan dari user
+    """
+    print(f"\n{'='*55}")
+    print(f"  🤖 BSJP Telegram Bot AKTIF")
+    print(f"  Bot: @saham10101_bot")
+    print(f"  Tekan Ctrl+C untuk berhenti")
+    print(f"{'='*55}\n")
+
+    # Test koneksi
+    token = CONFIG["TELEGRAM_TOKEN"]
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{token}/getMe",
+            timeout=10
+        )
+        if r.status_code == 200:
+            info = r.json()["result"]
+            print(f"  ✅ Terhubung sebagai: @{info['username']}")
+        else:
+            print(f"  ❌ Token tidak valid! Cek TELEGRAM_TOKEN")
+            return
+    except Exception as e:
+        print(f"  ❌ Koneksi gagal: {e}")
+        return
+
+    bot_kirim(CONFIG["TELEGRAM_CHAT_ID"],
+        f"🤖 <b>BSJP Bot Online!</b>\n"
+        f"{datetime.now().strftime('%d %b %Y %H:%M WIB')}\n\n"
+        f"Ketik /scan untuk mulai screening\n"
+        f"Ketik /help untuk daftar command"
+    )
+
+    offset = 0
+    print(f"  Menunggu command dari Telegram...\n")
+
+    while True:
+        try:
+            updates = bot_get_updates(offset)
+            for update in updates:
+                offset = update["update_id"] + 1
+                msg    = update.get("message", {})
+                teks   = msg.get("text", "")
+                chat   = msg.get("chat", {})
+                chat_id= str(chat.get("id", ""))
+                nama   = chat.get("first_name", "User")
+
+                # Hanya proses command (mulai /)
+                if teks.startswith("/"):
+                    proses_command(chat_id, teks, nama)
+
+        except KeyboardInterrupt:
+            print(f"\n\n  Bot dihentikan.")
+            break
+        except Exception as e:
+            print(f"  Error: {e}")
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    # python bsjp_bot.py      → screener biasa (manual)
+    # python bsjp_bot.py bot  → jalankan bot interaktif
+    if len(sys.argv) > 1 and sys.argv[1] == "bot":
+        jalankan_bot()
+    else:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print(f"\n\n  {Fore.YELLOW}Screener dihentikan.{Style.RESET_ALL}\n")
+            sys.exit(0)

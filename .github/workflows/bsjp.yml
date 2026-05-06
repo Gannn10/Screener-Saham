@@ -1,0 +1,87 @@
+name: BSJP Auto Screener
+
+on:
+  schedule:
+    - cron: '20 8 * * 1-5'
+    - cron: '30 2 * * 2-6'
+  workflow_dispatch:
+
+jobs:
+  screening:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '20 8 * * 1-5'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install library
+        run: |
+          pip install yfinance pandas numpy colorama requests beautifulsoup4
+
+      - name: Jalankan BSJP Screener
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python bsjp_auto.py
+
+      - name: Upload CSV ke artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hasil-screener-${{ github.run_id }}
+          path: bsjp_hasil_*.csv
+          retention-days: 2
+        continue-on-error: true
+
+  tracking:
+    if: github.event.schedule == '30 2 * * 2-6'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install library
+        run: |
+          pip install yfinance pandas numpy requests
+
+      - name: Download hasil screener kemarin
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hasil-screener-*
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Cek CSV tersedia
+        run: |
+          ls -la bsjp_hasil_*.csv 2>/dev/null || echo "Tidak ada CSV"
+
+      - name: Jalankan Morning Tracker
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python bsjp_tracker.py
+
+      - name: Upload hasil tracking
+        uses: actions/upload-artifact@v4
+        with:
+          name: hasil-tracking-${{ github.run_id }}
+          path: bsjp_tracking_*.csv
+          retention-days: 30
+        continue-on-error: true
