@@ -135,7 +135,8 @@ WATCHLIST = list(dict.fromkeys([
 CONFIG = {
     "SAFE_VSPIKE_MIN": 150, "NORMAL_VSPIKE_MIN": 100, "AGGRESSIVE_VSPIKE_MIN": 50,
     "SAFE_RSI_MAX": 60,     "NORMAL_RSI_MAX": 65,     "AGGRESSIVE_RSI_MAX": 70,
-    "RSI_MIN": 30,          "CHG_MIN": 1.0,           "SAFE_CHG_MAX": 15.0,
+    "RSI_MIN": 30,          "CHG_MIN": 1.0,           "SAFE_CHG_MAX": 12.0,
+    "NORMAL_CHG_MAX": 15.0,  # Filter pump — saham naik >15% skip (profit taking!)
     "VOL_AVG_PERIOD": 20,   "RSI_PERIOD": 14,         "ATR_PERIOD": 14,
     "MACD_FAST": 12,        "MACD_SLOW": 26,          "MACD_SIGNAL": 9,
     "BB_PERIOD": 20,        "BB_STD": 2.0,
@@ -1260,7 +1261,8 @@ def analisis_saham(ticker, mode):
 
     if rsi > rsi_max or rsi < CONFIG["RSI_MIN"]: return None
     if vspike < vs_min * 0.5:                    return None
-    if mode == "safe" and chg > CONFIG["SAFE_CHG_MAX"]: return None
+    if mode == "safe"   and chg > CONFIG["SAFE_CHG_MAX"]:   return None
+    if mode == "normal" and chg > CONFIG["NORMAL_CHG_MAX"]: return None
 
     # ── Filter MACD (FIXED) ────────────────────────────────────
     # SAFE   : tolak BEARISH dan BEARISH_STRONG
