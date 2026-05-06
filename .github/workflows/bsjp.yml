@@ -5,7 +5,7 @@ on:
     # ── Screener sore: jam 08:20 UTC = 15:20 WIB ──
     - cron: '20 8 * * 1-5'
     # ── Tracker pagi: jam 02:30 UTC = 09:30 WIB ──
-    - cron: '30 2 * * 2-6'
+    - cron: '30 2 * * 1-6'
   workflow_dispatch:
 
 jobs:
