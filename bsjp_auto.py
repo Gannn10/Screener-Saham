@@ -70,12 +70,15 @@ def main():
 
     print(f"  Scanning {total} saham mode {mode.upper()}...\n")
 
+    # Fetch IDX broker/whale data sekali
+    idx_cache = screener.ambil_idx_stock_summary()
+
     for idx, ticker in enumerate(screener.WATCHLIST):
         pct = int((idx+1) / total * 40)
         bar = "█" * pct + "░" * (40-pct)
         print(f"\r  [{bar}] {idx+1}/{total} {ticker:<8}", end="", flush=True)
         try:
-            r = screener.analisis_saham(ticker, mode)
+            r = screener.analisis_saham(ticker, mode, idx_cache)
             if r:
                 results.append(r)
         except Exception:

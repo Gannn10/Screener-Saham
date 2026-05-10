@@ -45,6 +45,12 @@ except ImportError:
     HAS_BS4 = False
 
 try:
+    from curl_cffi import requests as cf_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
+try:
     from colorama import init, Fore, Style
     init(autoreset=True)
 except ImportError:
@@ -659,17 +665,29 @@ def hitung_bollinger(closes):
     }
 
 
-def hitung_score(vspike, rsi, chg, macd_data, bb_data, vol_arah, candle, mode="normal"):
+def hitung_score(vspike, rsi, chg, macd_data, bb_data, vol_arah, candle,
+                 mode="normal", sentimen=None, whale=None):
     """
-    Scoring v5.0 — 7 komponen (total 100 poin)
-    ─────────────────────────────────────────────
+    Scoring v8.0 — 9 komponen (total 135 poin MAX)
+    ─────────────────────────────────────────────────
     VSpike      : 28 poin  (volume anomali)
     RSI         : 18 poin  (momentum)
     Chg%        : 12 poin  (konfirmasi naik)
     MACD        : 17 poin  (tren)
     BB          :  8 poin  (posisi & volatilitas)
     Arah Volume :  7 poin  (akumulasi vs distribusi)
-    Candlestick : 10 poin  (konfirmasi pola ← NEW v5.0)
+    Candlestick : 10 poin  (konfirmasi pola)
+    Sentimen    : 20 poin  (berita katalis)
+    Whale Flow  : 15 poin  (aliran asing/institusi ← NEW v8.0)
+    ─────────────────────────────────────────────────
+    Total max   : 135 poin
+    Signal KUAT : >= 95 poin
+    Signal MODERAT: >= 68 poin
+
+    Kenapa whale flow penting untuk BSJP:
+    Asing/institusi beli = validasi bahwa smart money
+    melihat potensi naik. Whale inflow + BSJP signal
+    = probabilitas gap up besok pagi SANGAT tinggi!
     """
     score = 0
 
@@ -725,17 +743,53 @@ def hitung_score(vspike, rsi, chg, macd_data, bb_data, vol_arah, candle, mode="n
         "INSUFFICIENT":        2,
     }.get(vol_arah["status"], 2)
 
-    # --- Candlestick (10 poin max) ← NEW v5.0 ---
-    # Skor candle 0–40, dinormalisasi ke 0–10
+    # --- Candlestick (10 poin max) ---
     candle_pts = int(min(candle["skor"] / 4, 10))
     score += candle_pts
 
-    return min(score, 100)
+    # --- Sentimen Berita (20 poin max) ← NEW v7.0 ---
+    # Sentimen positif sore hari = katalis utama gap up pagi
+    # Skor sentimen range -100 s/d +100
+    if sentimen and sentimen.get("total_berita", 0) > 0:
+        skor_sent = sentimen.get("skor", 0)
+        if skor_sent >= 50:    # Sangat Positif
+            score += 20
+        elif skor_sent >= 20:  # Positif
+            score += 14
+        elif skor_sent >= 5:   # Sedikit Positif
+            score += 8
+        elif skor_sent >= -5:  # Netral
+            score += 4
+        elif skor_sent >= -20: # Sedikit Negatif
+            score += 0
+        else:                   # Negatif / Sangat Negatif
+            score -= 5          # Penalti! Berita buruk = hindari
+    else:
+        # Tidak ada berita = netral, dapat poin kecil
+        score += 3
+
+    # --- Whale Flow (15 poin max) ← NEW v8.0 ---
+    # Smart money (asing/institusi) = validasi terkuat
+    # Whale inflow = mereka melihat potensi naik
+    if whale and whale.get("status") != "NO_DATA":
+        whale_skor = whale.get("skor", 0)
+        score += whale_skor  # -5 s/d +15
+    else:
+        # Tidak ada data IDX = netral, poin kecil
+        score += 2
+
+    return min(score, 135)  # Max 135 poin
 
 
 def get_signal(score):
-    if score >= 75:   return "KUAT   "
-    elif score >= 55: return "MODERAT"
+    """
+    Signal threshold disesuaikan untuk max 135 poin
+    KUAT    : >= 95  (setara 70% dari 135)
+    MODERAT : >= 68  (setara 50% dari 135)
+    LEMAH   : < 68
+    """
+    if score >= 95:   return "KUAT   "
+    elif score >= 68: return "MODERAT"
     else:             return "LEMAH  "
 
 
@@ -795,6 +849,332 @@ def fmt_vol(v):
     return str(int(v))
 
 def fmt_h(h): return f"{h:,.0f}".replace(",", ".")
+
+
+def hitung_panduan_trading(close: float, atr: float, score: int,
+                            vspike: float, sentimen: dict) -> dict:
+    """
+    Hitung panduan trading lengkap untuk BSJP
+    ──────────────────────────────────────────
+    Logika:
+    - Harga beli ideal = close ± spread after hours (biasanya ±0.5-1%)
+    - Target jual = berdasarkan ATR dan momentum
+    - Stop loss = 3-5% di bawah harga beli (tergantung volatilitas)
+    - Risk/Reward = (target - beli) / (beli - stop loss)
+
+    Makin tinggi score → target lebih optimis, stop loss lebih longgar
+    """
+    if atr == 0 or close == 0:
+        return None
+
+    atr_pct = (atr / close) * 100  # ATR dalam persen
+
+    # ── Harga beli ideal di after hours ──────────────────────
+    # After hours biasanya spread ±0.5-1% dari close
+    beli_low  = round(close * 0.995, 0)   # -0.5% dari close
+    beli_high = round(close * 1.005, 0)   # +0.5% dari close
+    beli_mid  = close                      # harga close = ideal
+
+    # ── Target jual besok pagi ────────────────────────────────
+    # Berdasarkan ATR dan score
+    # Score tinggi = momentum kuat = target lebih optimis
+    if score >= 100:
+        mult_target = 1.5   # 1.5x ATR
+    elif score >= 85:
+        mult_target = 1.2   # 1.2x ATR
+    elif score >= 70:
+        mult_target = 1.0   # 1.0x ATR
+    else:
+        mult_target = 0.7   # 0.7x ATR
+
+    # Bonus kalau sentimen sangat positif
+    sent_skor = sentimen.get("skor", 0) if sentimen else 0
+    if sent_skor >= 50:
+        mult_target *= 1.2  # +20% target kalau berita positif
+
+    target_min = round(close + atr * mult_target * 0.7, 0)
+    target_mid = round(close + atr * mult_target, 0)
+    target_max = round(close + atr * mult_target * 1.5, 0)
+
+    # Profit % dari harga close
+    profit_min_pct = round((target_min - close) / close * 100, 2)
+    profit_mid_pct = round((target_mid - close) / close * 100, 2)
+    profit_max_pct = round((target_max - close) / close * 100, 2)
+
+    # ── Stop loss ─────────────────────────────────────────────
+    # Berdasarkan volatilitas (ATR)
+    # Saham volatile = stop loss lebih longgar
+    if atr_pct >= 4:
+        sl_pct = 4.0   # volatile — stop loss 4%
+    elif atr_pct >= 2:
+        sl_pct = 3.0   # normal — stop loss 3%
+    else:
+        sl_pct = 2.5   # stabil — stop loss 2.5%
+
+    stop_loss = round(close * (1 - sl_pct / 100), 0)
+    sl_poin   = round(close - stop_loss, 0)
+
+    # ── Risk/Reward Ratio ─────────────────────────────────────
+    reward = target_mid - close
+    risk   = close - stop_loss
+    rr_ratio = round(reward / risk, 1) if risk > 0 else 0
+
+    # ── Rekomendasi ──────────────────────────────────────────
+    if rr_ratio >= 2.5:
+        rr_label = "✅ Sangat Layak"
+    elif rr_ratio >= 1.5:
+        rr_label = "✅ Layak"
+    elif rr_ratio >= 1.0:
+        rr_label = "⚠️ Cukup"
+    else:
+        rr_label = "❌ Kurang Layak"
+
+    return {
+        "beli_low":        beli_low,
+        "beli_mid":        beli_mid,
+        "beli_high":       beli_high,
+        "target_min":      target_min,
+        "target_mid":      target_mid,
+        "target_max":      target_max,
+        "profit_min_pct":  profit_min_pct,
+        "profit_mid_pct":  profit_mid_pct,
+        "profit_max_pct":  profit_max_pct,
+        "stop_loss":       stop_loss,
+        "sl_pct":          sl_pct,
+        "sl_poin":         sl_poin,
+        "rr_ratio":        rr_ratio,
+        "rr_label":        rr_label,
+    }
+
+# ═══════════════════════════════════════════════════════════════
+# BROKER SUMMARY — Whale Flow / Foreign Flow dari IDX API
+# ═══════════════════════════════════════════════════════════════
+
+# Cache global — 1 API call untuk semua 959 saham
+_IDX_STOCK_SUMMARY_CACHE = {}
+_IDX_CACHE_DATE = ""
+
+
+def ambil_idx_stock_summary(force_refresh: bool = False) -> dict:
+    """
+    Fetch data ringkasan perdagangan dari IDX API
+    ════════════════════════════════════════════
+    Endpoint: /primary/TradingSummary/GetStockSummary
+    Data: ForeignBuy, ForeignSell, Volume, Value, dll per saham
+
+    Menggunakan curl_cffi untuk bypass Cloudflare protection.
+    Data di-cache per tanggal — 1 API call = semua ~959 saham.
+
+    Return: dict {ticker: {foreign_buy, foreign_sell, net_foreign, ...}}
+    """
+    global _IDX_STOCK_SUMMARY_CACHE, _IDX_CACHE_DATE
+
+    today = datetime.now().strftime("%Y%m%d")
+
+    # Return cache jika sudah ada hari ini
+    if _IDX_CACHE_DATE == today and _IDX_STOCK_SUMMARY_CACHE and not force_refresh:
+        return _IDX_STOCK_SUMMARY_CACHE
+
+    if not HAS_CURL_CFFI:
+        print(f"  {Fore.YELLOW}[!] curl_cffi tidak terinstall - whale flow dilewati{Style.RESET_ALL}")
+        print(f"  {Fore.YELLOW}    Install: pip install curl_cffi{Style.RESET_ALL}")
+        return {}
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-broker/",
+        "Accept": "application/json",
+    }
+
+    # Coba beberapa tanggal terakhir (hari libur/weekend skip)
+    from datetime import timedelta
+    base_date = datetime.now()
+    dates_to_try = []
+    for i in range(5):
+        d = base_date - timedelta(days=i)
+        dates_to_try.append(d.strftime("%Y%m%d"))
+
+    url = "https://www.idx.co.id/primary/TradingSummary/GetStockSummary"
+
+    for date_str in dates_to_try:
+        try:
+            params = {"date": date_str, "start": "0", "length": "2000"}
+            r = cf_requests.get(
+                url, headers=headers, params=params,
+                timeout=20, impersonate="chrome"
+            )
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            items = data.get("data", [])
+
+            if not items:
+                continue
+
+            # Parse ke dict per ticker
+            cache = {}
+            for item in items:
+                code = item.get("StockCode", "").strip()
+                if not code:
+                    continue
+                fb = float(item.get("ForeignBuy", 0) or 0)
+                fs = float(item.get("ForeignSell", 0) or 0)
+                vol = float(item.get("Volume", 0) or 0)
+                val = float(item.get("Value", 0) or 0)
+                close = float(item.get("Close", 0) or 0)
+                chg = float(item.get("Change", 0) or 0)
+
+                net_foreign = fb - fs
+                net_foreign_val = net_foreign * close if close > 0 else 0
+                foreign_pct = ((fb + fs) / vol * 100) if vol > 0 else 0
+
+                cache[code] = {
+                    "foreign_buy":      fb,
+                    "foreign_sell":     fs,
+                    "net_foreign":      net_foreign,
+                    "net_foreign_val":  net_foreign_val,
+                    "foreign_pct":      round(foreign_pct, 1),
+                    "volume":           vol,
+                    "value":            val,
+                    "close":            close,
+                    "change":           chg,
+                    "date":             date_str,
+                }
+
+            _IDX_STOCK_SUMMARY_CACHE = cache
+            _IDX_CACHE_DATE = today
+            print(f"  {Fore.GREEN}✅ Data IDX loaded: {len(cache)} saham (tanggal {date_str}){Style.RESET_ALL}")
+            return cache
+
+        except Exception as e:
+            print(f"\r  IDX date {date_str}: {e}"  if str(e) else "")
+            continue
+
+    print(f"  {Fore.YELLOW}[!] Gagal ambil data IDX - whale flow tidak tersedia{Style.RESET_ALL}")
+    return {}
+
+
+def analisis_whale_flow(ticker: str, idx_cache: dict) -> dict:
+    """
+    Analisis Whale Flow / Foreign Flow per Saham
+    ══════════════════════════════════════════════
+    Data dari IDX API — ForeignBuy vs ForeignSell
+
+    Klasifikasi:
+    ────────────
+    WHALE STRONG 🐋🔥 : Net foreign > 0, foreign % volume >= 50%
+                         Smart money masuk besar → sinyal terkuat
+    WHALE INFLOW 🐋   : Net foreign > 0, foreign % volume >= 25%
+                         Asing beli lebih banyak dari jual
+    NETRAL ⚪          : Net foreign mendekati 0 atau foreign kecil
+    FOREIGN OUT 🔴     : Net foreign < 0, foreign % volume >= 25%
+                         Asing jualan → hati-hati
+    FOREIGN DUMP 🚨   : Net foreign < 0, foreign % volume >= 50%
+                         Smart money kabur → HINDARI!
+    RETAIL ONLY ⚠️    : Foreign % volume < 15%
+                         Pergerakan driven retail — kurang reliable
+    NO DATA            : Data IDX tidak tersedia
+
+    Kenapa ini penting untuk BSJP:
+    Saham yang naik + whale inflow = momentum KUAT besok pagi.
+    Saham yang naik + whale outflow = kemungkinan profit taking besok!
+    """
+    if not idx_cache or ticker not in idx_cache:
+        return {
+            "status":       "NO_DATA",
+            "label":        "Data IDX tidak tersedia",
+            "net_foreign":  0,
+            "net_foreign_val": 0,
+            "foreign_pct":  0,
+            "aman":         True,  # Tidak menghambat jika tidak ada data
+            "skor":         0,
+        }
+
+    d = idx_cache[ticker]
+    net_f    = d["net_foreign"]
+    net_fv   = d["net_foreign_val"]
+    f_pct    = d["foreign_pct"]
+    fb       = d["foreign_buy"]
+    fs       = d["foreign_sell"]
+
+    # Hitung net ratio: seberapa dominan satu sisi
+    net_ratio = 0
+    if (fb + fs) > 0:
+        net_ratio = abs(net_f) / (fb + fs) * 100  # 0-100%
+
+    # Klasifikasi
+    if f_pct < 15:
+        # Foreign terlalu kecil — retail driven
+        status  = "RETAIL_ONLY"
+        label   = "⚠️ Retail driven"
+        aman    = True
+        skor    = 3  # Netral
+    elif net_f > 0 and f_pct >= 50 and net_ratio >= 15:
+        status  = "WHALE_STRONG"
+        label   = "🐋🔥 Whale Strong Inflow!"
+        aman    = True
+        skor    = 15
+    elif net_f > 0 and f_pct >= 25:
+        status  = "WHALE_INFLOW"
+        label   = "🐋 Whale Inflow"
+        aman    = True
+        skor    = 10
+    elif net_f > 0:
+        status  = "INFLOW_KECIL"
+        label   = "🟢 Foreign inflow kecil"
+        aman    = True
+        skor    = 6
+    elif net_f < 0 and f_pct >= 50 and net_ratio >= 15:
+        status  = "FOREIGN_DUMP"
+        label   = "🚨 Foreign Dump!"
+        aman    = False
+        skor    = -5  # Penalti!
+    elif net_f < 0 and f_pct >= 25:
+        status  = "FOREIGN_OUT"
+        label   = "🔴 Foreign Outflow"
+        aman    = False
+        skor    = 0
+    elif net_f < 0:
+        status  = "OUTFLOW_KECIL"
+        label   = "🟡 Outflow kecil"
+        aman    = True
+        skor    = 2
+    else:
+        status  = "NETRAL"
+        label   = "⚪ Netral"
+        aman    = True
+        skor    = 3
+
+    return {
+        "status":          status,
+        "label":           label,
+        "net_foreign":     net_f,
+        "net_foreign_val": net_fv,
+        "foreign_buy":     fb,
+        "foreign_sell":    fs,
+        "foreign_pct":     f_pct,
+        "aman":            aman,
+        "skor":            skor,
+    }
+
+
+def fmt_net_foreign(val):
+    """Format net foreign value jadi readable"""
+    if abs(val) >= 1e12:
+        return f"{val/1e12:+.1f}T"
+    elif abs(val) >= 1e9:
+        return f"{val/1e9:+.1f}B"
+    elif abs(val) >= 1e6:
+        return f"{val/1e6:+.0f}M"
+    elif abs(val) >= 1e3:
+        return f"{val/1e3:+.0f}K"
+    return f"{val:+.0f}"
+
 
 # ═══════════════════════════════════════════════════════════════
 # AMBIL & ANALISIS DATA
@@ -1035,7 +1415,7 @@ def telegram_kirim(pesan: str) -> bool:
 
 def format_pesan_telegram(results: list, mode: str,
                            sentimen_cache: dict = None) -> str:
-    """Format hasil screener jadi pesan Telegram yang rapi"""
+    """Format hasil screener jadi pesan Telegram lengkap dengan panduan trading"""
     top3 = sorted(results, key=lambda x: x["score"], reverse=True)[:3]
     tgl  = datetime.now().strftime("%d %b %Y %H:%M WIB")
 
@@ -1050,30 +1430,56 @@ def format_pesan_telegram(results: list, mode: str,
         )
 
     baris = [
-        f"📊 <b>BSJP Screener — {tgl}</b>",
+        f"📊 <b>BSJP Screener v8.0 — {tgl}</b>",
         f"Mode: {mode.upper()} | {len(results)} saham lolos\n",
         f"⭐ <b>TOP 3 PICKS HARI INI:</b>\n",
     ]
 
     medals = ["🥇", "🥈", "🥉"]
     for i, r in enumerate(top3):
-        sentimen = sentimen_cache.get(r["ticker"]) if sentimen_cache else None
-        sent_txt = f" | Berita: {sentimen['label']}" if sentimen else ""
-
-        baris.append(
-            f"{medals[i]} <b>{r['ticker']}</b> [{r['sektor']}]\n"
-            f"   Score: {r['score']} | Close: {fmt_h(r['close'])} "
-            f"| Chg: +{r['chg']:.2f}%\n"
-            f"   VSpike: {r['vspike']:.0f}% | RSI: {r['rsi']:.1f} "
-            f"| {r['macd']['label']}\n"
-            f"   Est besok: {fmt_h(r['range']['target_low'])} – "
-            f"{fmt_h(r['range']['target_mid'])} – "
-            f"{fmt_h(r['range']['target_high'])} "
-            f"({r['range']['arah']} ~{r['range']['confidence']}%)"
-            f"{sent_txt}\n"
+        # Ambil sentimen — dari dict hasil analisis atau cache
+        sentimen = r.get("sentimen") or (
+            sentimen_cache.get(r["ticker"]) if sentimen_cache else None
         )
+        sent_label = sentimen["label"] if sentimen else "Tidak ada data"
+        p = r.get("panduan")
+        wh = r.get("whale", {})
+
+        # Info dasar saham
+        baris.append(
+            f"{medals[i]} <b>{r['ticker']}</b> [{r['sektor']}]  "
+            f"Score: <b>{r['score']}/135</b>\n"
+            f"   Close : {fmt_h(r['close'])} | Chg: +{r['chg']:.2f}%\n"
+            f"   VSpike: {r['vspike']:.0f}% | RSI: {r['rsi']:.1f} | "
+            f"{r['macd']['label']}\n"
+            f"   Berita: {sent_label}\n"
+        )
+
+        # Whale Flow
+        if wh and wh.get("status") != "NO_DATA":
+            net_f_str = fmt_net_foreign(wh.get("net_foreign_val", 0))
+            baris.append(
+                f"   🐋 Whale: {wh['label']}  "
+                f"(Net: {net_f_str}  F%: {wh.get('foreign_pct',0):.0f}%)\n"
+            )
+
+        # Candle pattern
         if r["candle"]["ada_bullish"]:
-            baris.append(f"   🕯️ Candle: {r['candle']['label']}\n")
+            baris.append(f"   🕯️ {r['candle']['label']}\n")
+
+        # Panduan trading
+        if p:
+            baris.append(
+                f"   💰 <b>PANDUAN TRADING:</b>\n"
+                f"   Beli sore   : {fmt_h(p['beli_low'])} – {fmt_h(p['beli_high'])}\n"
+                f"   Target jual : {fmt_h(p['target_min'])} – "
+                f"{fmt_h(p['target_mid'])} – {fmt_h(p['target_max'])}\n"
+                f"   (+{p['profit_min_pct']:.1f}% – "
+                f"+{p['profit_mid_pct']:.1f}% – "
+                f"+{p['profit_max_pct']:.1f}%)\n"
+                f"   Stop loss   : {fmt_h(p['stop_loss'])} (-{p['sl_pct']:.1f}%)\n"
+                f"   Risk/Reward : 1 : {p['rr_ratio']} {p['rr_label']}\n"
+            )
 
     # Ringkasan sektor dominan
     sektor_count = {}
@@ -1142,10 +1548,11 @@ def jalankan_screening_otomatis():
 
     # Scan semua saham
     results = []
+    idx_cache = ambil_idx_stock_summary()  # Fetch IDX data sekali untuk semua
     for idx, ticker in enumerate(WATCHLIST):
         print_progress(idx+1, len(WATCHLIST), ticker)
         try:
-            r = analisis_saham(ticker, mode)
+            r = analisis_saham(ticker, mode, idx_cache)
             if r:
                 results.append(r)
         except Exception:
@@ -1232,7 +1639,7 @@ def ambil_data(ticker):
         return None
 
 
-def analisis_saham(ticker, mode):
+def analisis_saham(ticker, mode, idx_cache=None):
     df = ambil_data(ticker)
     if df is None:
         return None
@@ -1250,7 +1657,7 @@ def analisis_saham(ticker, mode):
     macd     = hitung_macd(closes)
     bb       = hitung_bollinger(closes)
     vol_arah = hitung_arah_volume(df)
-    candle   = deteksi_candlestick(df)          # ← NEW v5.0
+    candle   = deteksi_candlestick(df)
 
     # Filter dasar
     if vol < CONFIG["MIN_VOLUME"]:  return None
@@ -1264,25 +1671,47 @@ def analisis_saham(ticker, mode):
     if mode == "safe"   and chg > CONFIG["SAFE_CHG_MAX"]:   return None
     if mode == "normal" and chg > CONFIG["NORMAL_CHG_MAX"]: return None
 
-    # ── Filter MACD (FIXED) ────────────────────────────────────
-    # SAFE   : tolak BEARISH dan BEARISH_STRONG
-    # NORMAL : tolak BEARISH_STRONG saja
-    # AGGR   : tidak ada filter MACD
+    # ── Filter MACD ─────────────────────────────────────────────
     if mode == "safe"   and macd["status"] in ("BEARISH","BEARISH_STRONG"): return None
     if mode == "normal" and macd["status"] == "BEARISH_STRONG":             return None
 
     if mode in ("safe", "normal") and vol_arah["distribusi_hari_ini"]: return None
     if mode == "safe" and not vol_arah["aman"]: return None
 
-    score  = hitung_score(vspike, rsi, chg, macd, bb, vol_arah, candle, mode)
+    # ── Ambil sentimen berita ────────────────────────────────────
+    sentimen = ambil_sentimen(ticker)
+
+    # Filter tambahan: kalau sentimen SANGAT NEGATIF di mode safe → skip
+    if mode == "safe" and sentimen.get("skor", 0) < -30:
+        return None
+
+    # ── Whale Flow / Broker Summary (NEW v8.0) ─────────────
+    whale = analisis_whale_flow(ticker, idx_cache)
+
+    # Filter: foreign dump di mode safe → skip
+    if mode == "safe" and whale["status"] in ("FOREIGN_DUMP", "FOREIGN_OUT"):
+        return None
+    # Filter: foreign dump di mode normal → skip
+    if mode == "normal" and whale["status"] == "FOREIGN_DUMP":
+        return None
+
+    score  = hitung_score(vspike, rsi, chg, macd, bb, vol_arah, candle,
+                          mode, sentimen, whale)
     signal = get_signal(score)
 
     # Hint — prioritas dari sinyal terkuat
     hint = "-"
     if vol_arah["distribusi_hari_ini"]:        hint = "DISTRIB🚨"
+    elif whale["status"] == "WHALE_STRONG" and macd["status"] == "GOLDEN_CROSS":
+                                               hint = "WHALE+GOLDEN💎"
+    elif whale["status"] == "WHALE_STRONG":    hint = "WHALE🐋🔥"
+    elif sentimen.get("skor", 0) >= 50 and macd["status"] == "GOLDEN_CROSS":
+                                               hint = "GOLDEN+BERITA💎"
     elif candle["ada_bullish"] and macd["status"] == "GOLDEN_CROSS":
                                                hint = "GOLDEN+CANDLE💎"
     elif macd["status"] == "GOLDEN_CROSS":     hint = "GOLDEN✨"
+    elif whale["status"] == "WHALE_INFLOW":    hint = "WHALE🐋"
+    elif sentimen.get("skor", 0) >= 50:        hint = "BERITA POSITIF📰"
     elif candle["pola"] and "Morning Star ⭐" in candle["pola"]:
                                                hint = "MORNING STAR⭐"
     elif candle["pola"] and "3 White Soldiers 🪖" in candle["pola"]:
@@ -1299,17 +1728,20 @@ def analisis_saham(ticker, mode):
 
     sektor = SEKTOR.get(ticker, "Lainnya")
     rng    = hitung_range_besok(close, atr, vspike, rsi, chg, macd, bb)
+    panduan = hitung_panduan_trading(close, atr, score, vspike, sentimen)
 
     return {
-        "ticker":   ticker,   "sektor":  sektor,
-        "close":    close,    "chg":     chg,
-        "volume":   vol,      "vspike":  vspike,
-        "rsi":      rsi,      "atr":     atr,
+        "ticker":   ticker,   "sektor":   sektor,
+        "close":    close,    "chg":      chg,
+        "volume":   vol,      "vspike":   vspike,
+        "rsi":      rsi,      "atr":      atr,
         "support":  sup,      "resistance": res,
-        "macd":     macd,     "bb":      bb,
-        "vol_arah": vol_arah, "candle":  candle,   # ← NEW v5.0
-        "score":    score,    "signal":  signal,
-        "hint":     hint,     "range":   rng,
+        "macd":     macd,     "bb":       bb,
+        "vol_arah": vol_arah, "candle":   candle,
+        "sentimen": sentimen, "whale":    whale,   # ← NEW v8.0
+        "panduan":  panduan,
+        "score":    score,    "signal":   signal,
+        "hint":     hint,     "range":    rng,
     }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1318,7 +1750,7 @@ def analisis_saham(ticker, mode):
 
 def print_header():
     print(f"\n{Fore.CYAN}{Style.BRIGHT}{'═'*74}")
-    print(f"  BSJP SCREENER v4.0 — IHSG  |  MACD + BB + Sektor + Arah Volume")
+    print(f"  BSJP SCREENER v8.0 — IHSG  |  +Whale Flow / Broker Summary")
     print(f"  {datetime.now().strftime('%d %B %Y, %H:%M WIB')}  |  Watchlist: {len(WATCHLIST)} saham")
     print(f"{'═'*74}{Style.RESET_ALL}")
     wt = cek_waktu_scan()
@@ -1352,20 +1784,23 @@ def print_results(results, mode):
     print(f"  {len(results)} lolos → top {len(top)} ditampilkan")
     print(f"{Fore.CYAN}{'═'*74}{Style.RESET_ALL}")
     print(f"\n  {'#':<3} {'TICKER':<7} {'CLOSE':>7} {'CHG%':>7} {'VSPIKE':>7} "
-          f"{'RSI':>5} {'MACD':<14} {'BB':<22} {'SCORE':>5} HINT")
-    print(f"  {'─'*3} {'─'*7} {'─'*7} {'─'*7} {'─'*7} {'─'*5} {'─'*14} {'─'*22} {'─'*5} {'─'*12}")
+          f"{'RSI':>5} {'WHALE':<12} {'SCORE':>5} HINT")
+    print(f"  {'─'*3} {'─'*7} {'─'*7} {'─'*7} {'─'*7} {'─'*5} {'─'*12} {'─'*5} {'─'*16}")
 
     for i, r in enumerate(top, 1):
-        c = Fore.GREEN+Style.BRIGHT if r["score"]>=75 else (Fore.YELLOW if r["score"]>=55 else Style.DIM)
+        c = Fore.GREEN+Style.BRIGHT if r["score"]>=85 else (Fore.YELLOW if r["score"]>=65 else Style.DIM)
         cc= Fore.GREEN if r["chg"]>0 else Fore.RED
-        hc= Fore.MAGENTA if any(x in r["hint"] for x in ["GOLDEN","BREAKOUT","MOMO","SPIKE"]) else Fore.CYAN
-        macd_short = r["macd"]["label"][:13]
-        bb_short   = r["bb"]["label"][:21]
+        hc= Fore.MAGENTA if any(x in r["hint"] for x in ["GOLDEN","BREAKOUT","MOMO","WHALE"]) else Fore.CYAN
+        # Whale label short
+        w = r.get("whale", {})
+        whale_short = w.get("label", "-")[:11] if w else "-"
+        wc = Fore.GREEN if w.get("status","") in ("WHALE_STRONG","WHALE_INFLOW","INFLOW_KECIL") else (
+             Fore.RED if w.get("status","") in ("FOREIGN_DUMP","FOREIGN_OUT") else Fore.YELLOW)
         print(
             f"  {c}{i:<3}{Style.RESET_ALL} {c}{r['ticker']:<7}{Style.RESET_ALL} "
             f"{fmt_h(r['close']):>7} {cc}{r['chg']:>+6.2f}%{Style.RESET_ALL} "
             f"{r['vspike']:>6.0f}% {r['rsi']:>5.1f} "
-            f"{macd_short:<14} {bb_short:<22} "
+            f"{wc}{whale_short:<12}{Style.RESET_ALL} "
             f"{c}{r['score']:>5}{Style.RESET_ALL} {hc}{r['hint']}{Style.RESET_ALL}"
         )
 
@@ -1463,10 +1898,19 @@ def print_macd_bb_detail(results):
                   f"(Skor candle: +{cd['skor']})")
         else:
             print(f"    Candle   : {Fore.WHITE}Tidak ada pola bullish khusus{Style.RESET_ALL}")
+        # Whale Flow
+        wh = r.get("whale", {})
+        if wh and wh.get("status") != "NO_DATA":
+            whc = Fore.GREEN if wh.get("aman") else Fore.RED
+            net_f_str = fmt_net_foreign(wh.get("net_foreign_val", 0))
+            print(f"    Whale    : {whc}{wh['label']}{Style.RESET_ALL}  "
+                  f"(Net Foreign: {net_f_str}  F%vol: {wh.get('foreign_pct',0):.0f}%  "
+                  f"Buy:{fmt_vol(wh.get('foreign_buy',0))} Sell:{fmt_vol(wh.get('foreign_sell',0))})")
         print(f"    Range    : {Fore.RED}{fmt_h(r['range']['target_low'])}{Style.RESET_ALL} – "
               f"{Fore.YELLOW}{fmt_h(r['range']['target_mid'])}{Style.RESET_ALL} – "
               f"{Fore.GREEN}{fmt_h(r['range']['target_high'])}{Style.RESET_ALL}  "
               f"({r['range']['arah']} ~{r['range']['confidence']}%)\n")
+
 
 
 def print_top3(results):
@@ -1579,6 +2023,10 @@ def simpan_csv(results, mode):
         "bb_status": r["bb"]["status"], "bb_pct_b": r["bb"]["pct_b"],
         "bb_upper": r["bb"]["upper"], "bb_lower": r["bb"]["lower"],
         "support": r["support"], "resistance": r["resistance"],
+        "whale_status":     r.get("whale",{}).get("status","-"),
+        "whale_net_foreign":r.get("whale",{}).get("net_foreign",0),
+        "whale_foreign_pct":r.get("whale",{}).get("foreign_pct",0),
+        "whale_skor":       r.get("whale",{}).get("skor",0),
         "score": r["score"], "signal": r["signal"].strip(), "hint": r["hint"],
         "est_low": r["range"]["target_low"],
         "est_mid": r["range"]["target_mid"],
@@ -1601,12 +2049,13 @@ def simpan_csv(results, mode):
 def run_all_modes():
     all_res = {}
     ticker_count = {}
+    idx_cache = ambil_idx_stock_summary()  # Fetch IDX data sekali
     for mode in ["safe","normal","aggressive"]:
         print(f"\n  {Fore.YELLOW}━━━ Mode: {mode.upper()} ━━━{Style.RESET_ALL}")
         results = []
         for idx, ticker in enumerate(WATCHLIST):
             print_progress(idx+1, len(WATCHLIST), ticker)
-            r = analisis_saham(ticker, mode)
+            r = analisis_saham(ticker, mode, idx_cache)
             if r:
                 results.append(r)
                 ticker_count[ticker] = ticker_count.get(ticker, 0) + 1
@@ -1703,10 +2152,11 @@ def main():
     print(f"\n  {Fore.YELLOW}Scanning {len(WATCHLIST)} saham...{Style.RESET_ALL}\n")
 
     results, errors = [], 0
+    idx_cache = ambil_idx_stock_summary()  # Fetch IDX data sekali
     for idx, ticker in enumerate(WATCHLIST):
         print_progress(idx+1, len(WATCHLIST), ticker)
         try:
-            r = analisis_saham(ticker, mode)
+            r = analisis_saham(ticker, mode, idx_cache)
             if r: results.append(r)
         except Exception:
             errors += 1
@@ -1834,9 +2284,10 @@ def jalankan_scan_bot(chat_id: str, mode: str):
 
     # Scan
     results = []
+    idx_cache = ambil_idx_stock_summary()
     for ticker in WATCHLIST:
         try:
-            r = analisis_saham(ticker, mode)
+            r = analisis_saham(ticker, mode, idx_cache)
             if r:
                 results.append(r)
         except Exception:
@@ -1889,12 +2340,13 @@ def jalankan_scan_all_bot(chat_id: str):
 
     all_res      = {}
     ticker_count = {}
+    idx_cache    = ambil_idx_stock_summary()
 
     for mode in ["safe", "normal", "aggressive"]:
         results = []
         for ticker in WATCHLIST:
             try:
-                r = analisis_saham(ticker, mode)
+                r = analisis_saham(ticker, mode, idx_cache)
                 if r:
                     results.append(r)
                     ticker_count[ticker] = ticker_count.get(ticker, 0) + 1
