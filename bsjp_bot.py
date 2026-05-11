@@ -1048,7 +1048,7 @@ def ambil_idx_stock_summary(force_refresh: bool = False) -> dict:
 
             _IDX_STOCK_SUMMARY_CACHE = cache
             _IDX_CACHE_DATE = today
-            print(f"  {Fore.GREEN}✅ Data IDX loaded: {len(cache)} saham (tanggal {date_str}){Style.RESET_ALL}")
+            print(f"  {Fore.GREEN}[OK] Data IDX loaded: {len(cache)} saham (tanggal {date_str}){Style.RESET_ALL}")
             return cache
 
         except Exception as e:
@@ -1087,11 +1087,12 @@ def analisis_whale_flow(ticker: str, idx_cache: dict) -> dict:
     if not idx_cache or ticker not in idx_cache:
         return {
             "status":       "NO_DATA",
-            "label":        "Data IDX tidak tersedia",
+            "label":        "N/A",
+            "label_tg":     "Data IDX tidak tersedia",
             "net_foreign":  0,
             "net_foreign_val": 0,
             "foreign_pct":  0,
-            "aman":         True,  # Tidak menghambat jika tidak ada data
+            "aman":         True,
             "skor":         0,
         }
 
@@ -1108,51 +1109,61 @@ def analisis_whale_flow(ticker: str, idx_cache: dict) -> dict:
         net_ratio = abs(net_f) / (fb + fs) * 100  # 0-100%
 
     # Klasifikasi
+    # label    = terminal (ASCII safe, no emoji)
+    # label_tg = telegram (emoji OK)
     if f_pct < 15:
-        # Foreign terlalu kecil — retail driven
-        status  = "RETAIL_ONLY"
-        label   = "⚠️ Retail driven"
-        aman    = True
-        skor    = 3  # Netral
+        status   = "RETAIL_ONLY"
+        label    = "[!] Retail"
+        label_tg = "Retail driven"
+        aman     = True
+        skor     = 3
     elif net_f > 0 and f_pct >= 50 and net_ratio >= 15:
-        status  = "WHALE_STRONG"
-        label   = "🐋🔥 Whale Strong Inflow!"
-        aman    = True
-        skor    = 15
+        status   = "WHALE_STRONG"
+        label    = "[W++] Strong!"
+        label_tg = "Whale Strong Inflow!"
+        aman     = True
+        skor     = 15
     elif net_f > 0 and f_pct >= 25:
-        status  = "WHALE_INFLOW"
-        label   = "🐋 Whale Inflow"
-        aman    = True
-        skor    = 10
+        status   = "WHALE_INFLOW"
+        label    = "[W+] Inflow"
+        label_tg = "Whale Inflow"
+        aman     = True
+        skor     = 10
     elif net_f > 0:
-        status  = "INFLOW_KECIL"
-        label   = "🟢 Foreign inflow kecil"
-        aman    = True
-        skor    = 6
+        status   = "INFLOW_KECIL"
+        label    = "[+] Inflow"
+        label_tg = "Foreign inflow kecil"
+        aman     = True
+        skor     = 6
     elif net_f < 0 and f_pct >= 50 and net_ratio >= 15:
-        status  = "FOREIGN_DUMP"
-        label   = "🚨 Foreign Dump!"
-        aman    = False
-        skor    = -5  # Penalti!
+        status   = "FOREIGN_DUMP"
+        label    = "[!!] F.Dump!"
+        label_tg = "Foreign Dump!"
+        aman     = False
+        skor     = -5
     elif net_f < 0 and f_pct >= 25:
-        status  = "FOREIGN_OUT"
-        label   = "🔴 Foreign Outflow"
-        aman    = False
-        skor    = 0
+        status   = "FOREIGN_OUT"
+        label    = "[-] Outflow"
+        label_tg = "Foreign Outflow"
+        aman     = False
+        skor     = 0
     elif net_f < 0:
-        status  = "OUTFLOW_KECIL"
-        label   = "🟡 Outflow kecil"
-        aman    = True
-        skor    = 2
+        status   = "OUTFLOW_KECIL"
+        label    = "[-] Out kecil"
+        label_tg = "Outflow kecil"
+        aman     = True
+        skor     = 2
     else:
-        status  = "NETRAL"
-        label   = "⚪ Netral"
-        aman    = True
-        skor    = 3
+        status   = "NETRAL"
+        label    = "[=] Netral"
+        label_tg = "Netral"
+        aman     = True
+        skor     = 3
 
     return {
         "status":          status,
         "label":           label,
+        "label_tg":        label_tg,
         "net_foreign":     net_f,
         "net_foreign_val": net_fv,
         "foreign_buy":     fb,
@@ -1161,7 +1172,6 @@ def analisis_whale_flow(ticker: str, idx_cache: dict) -> dict:
         "aman":            aman,
         "skor":            skor,
     }
-
 
 def fmt_net_foreign(val):
     """Format net foreign value jadi readable"""
