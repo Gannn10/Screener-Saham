@@ -127,6 +127,8 @@ def main():
             df_history.insert(0, 'tanggal', datetime.now().strftime("%Y-%m-%d"))
         if 'jam' not in df_history.columns:
             df_history.insert(1, 'jam', datetime.now().strftime("%H:%M"))
+        if 'data_type' not in df_history.columns:
+            df_history.insert(2, 'data_type', 'live')
             
         file_exists = os.path.isfile(history_file)
         df_history.to_csv(history_file, mode='a', header=not file_exists, index=False)
