@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BSJP Web Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <!-- TradingView Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+    <div class="background-blur"></div>
+    
+    <div class="app-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>BSJP <span>Terminal</span></h1>
+                <p class="version">v12.0 Pro</p>
+            </div>
+            
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active" data-target="view-swing">
+                    <span class="nav-icon">🟢</span> Beli Sore Jual Pagi
+                </a>
+                <a href="#" class="nav-item" data-target="view-gorengan">
+                    <span class="nav-icon">🔥</span> Intraday Hunter
+                </a>
+                <a href="#" class="nav-item" data-target="view-history">
+                    <span class="nav-icon">📈</span> Win-Rate History
+                </a>
+                <a href="#" class="nav-item" data-target="view-settings">
+                    <span class="nav-icon">⚙️</span> Settings
+                </a>
+            </nav>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <header class="topbar">
+                <h2 id="page-title">Beli Sore Jual Pagi</h2>
+                <div class="weather-badge" id="weather-badge">
+                    <span class="icon">🔍</span>
+                    <span id="weather-text">Mengecek Cuaca IHSG...</span>
+                </div>
+            </header>
+
+            <div class="content-wrapper">
+                <!-- VIEW: SWING -->
+                <section id="view-swing" class="view-section active">
+                    <div class="controls-panel">
+                        <div>
+                            <p class="panel-desc">Screener untuk saham bluechip/mid-cap dengan fundamental & teknikal kuat untuk ditahan 2-5 hari.</p>
+                            <div style="margin-top: 10px;">
+                                <select id="bsjp-mode-select" class="glass-input" style="width: 200px; display: inline-block;">
+                                    <option value="normal">Mode Normal</option>
+                                    <option value="safe">Mode Safe (Ketat)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <button class="btn-primary" onclick="startScanBSJP()">Mulai Scan BSJP</button>
+                    </div>
+                    <div class="results-container">
+                        <div class="grid-container" id="results-grid-swing">
+                            <div class="empty-state">Belum ada hasil scan. Silakan klik Mulai Scan.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VIEW: GORENGAN -->
+                <section id="view-gorengan" class="view-section hidden">
+                    <div class="controls-panel goregan-panel">
+                        <p class="panel-desc">Screener khusus saham lapis 3 (Gorengan) dengan volatilitas tinggi. Copet / Fast Trade Only!</p>
+                        <button class="btn-primary btn-danger" onclick="startScan('gorengan')">Mulai Scan Intraday</button>
+                    </div>
+                    <div class="results-container">
+                        <div class="grid-container" id="results-grid-gorengan">
+                            <div class="empty-state">Belum ada hasil scan. Silakan klik Mulai Scan.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VIEW: HISTORY -->
+                <section id="view-history" class="view-section hidden">
+                    <div class="history-layout">
+                        <!-- Left sidebar for daily report files -->
+                        <div class="history-sidebar">
+                            <h4>Daftar Hasil Harian</h4>
+                            <div class="history-files-list" id="history-files-list">
+                                <div class="empty-state" style="font-size:12px; padding:0;">Mencari file...</div>
+                            </div>
+                        </div>
+                        <!-- Right main panel for details -->
+                        <div class="history-main">
+                            <div class="controls-panel" style="margin-bottom: 20px;">
+                                <p class="panel-desc">Evaluasi otomatis kinerja saham rekomendasi hasil scan.</p>
+                                <button class="btn-primary" onclick="loadHistoryFiles()">Refresh Daftar</button>
+                            </div>
+                            <div class="history-container" id="history-content">
+                                <div class="empty-state">Silakan pilih salah satu tanggal hasil scan di sebelah kiri.</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VIEW: SETTINGS -->
+                <section id="view-settings" class="view-section hidden">
+                    <div class="settings-panel">
+                        <h3>Bot Configuration</h3>
+                        <form id="settings-form">
+                            <div class="form-group">
+                                <label>Telegram Token</label>
+                                <input type="text" id="cfg-telegram-token" class="glass-input">
+                            </div>
+                            <div class="form-group">
+                                <label>Telegram Chat ID</label>
+                                <input type="text" id="cfg-telegram-chat" class="glass-input">
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>VSpike Min (Safe)</label>
+                                    <input type="number" id="cfg-safe-vspike" class="glass-input">
+                                </div>
+                                <div class="form-group">
+                                    <label>VSpike Min (Normal)</label>
+                                    <input type="number" id="cfg-normal-vspike" class="glass-input">
+                                </div>
+                                <div class="form-group">
+                                    <label>VSpike Min (Gorengan)</label>
+                                    <input type="number" id="cfg-agr-vspike" class="glass-input">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>RSI Max (Safe)</label>
+                                    <input type="number" id="cfg-safe-rsi" class="glass-input">
+                                </div>
+                                <div class="form-group">
+                                    <label>RSI Max (Normal)</label>
+                                    <input type="number" id="cfg-normal-rsi" class="glass-input">
+                                </div>
+                                <div class="form-group">
+                                    <label>RSI Max (Gorengan)</label>
+                                    <input type="number" id="cfg-agr-rsi" class="glass-input">
+                                </div>
+                            </div>
+                            <button type="submit" class="btn-primary">Simpan Pengaturan</button>
+                        </form>
+                    </div>
+                </section>
+            </div>
+            
+            <!-- GLOBAL PROGRESS BAR -->
+            <div id="global-progress" class="progress-overlay hidden">
+                <div class="progress-box">
+                    <div class="spinner"></div>
+                    <div id="progress-text">Scanning saham... Mohon tunggu</div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- Modal Detail Saham -->
+    <div id="stock-modal" class="modal hidden">
+        <div class="modal-content large-modal">
+            <span class="close-btn" id="close-modal">&times;</span>
+            <div class="modal-header">
+                <h2 id="modal-ticker">TICKER</h2>
+                <div id="modal-sektor" class="text-muted">Sektor</div>
+            </div>
+            
+            <div class="modal-tabs">
+                <button class="tab-btn active" onclick="switchTab('tab-chart')">Live Chart</button>
+                <button class="tab-btn" onclick="switchTab('tab-score')">Score Breakdown</button>
+                <button class="tab-btn" onclick="switchTab('tab-broker')">Broker Flow</button>
+                <button class="tab-btn" onclick="switchTab('tab-news')">Berita Terkini</button>
+            </div>
+
+            <div id="tab-chart" class="tab-content active">
+                <div id="chart-container" style="width: 100%; height: 350px;"></div>
+            </div>
+
+            <div id="tab-score" class="tab-content">
+                <div id="score-breakdown-container">Loading score...</div>
+            </div>
+
+            <div id="tab-broker" class="tab-content">
+                <div id="broker-flow-container">Loading broker...</div>
+            </div>
+
+            <div id="tab-news" class="tab-content">
+                <div id="news-container">Loading news...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

@@ -138,29 +138,45 @@ WATCHLIST = list(dict.fromkeys([
 # ═══════════════════════════════════════════════════════════════
 # KONFIGURASI
 # ═══════════════════════════════════════════════════════════════
-CONFIG = {
+
+DEFAULT_CONFIG = {
     "SAFE_VSPIKE_MIN": 150, "NORMAL_VSPIKE_MIN": 100, "AGGRESSIVE_VSPIKE_MIN": 50,
     "SAFE_RSI_MAX": 60,     "NORMAL_RSI_MAX": 65,     "AGGRESSIVE_RSI_MAX": 70,
     "RSI_MIN": 30,          "CHG_MIN": 1.0,           "SAFE_CHG_MAX": 12.0,
-    "NORMAL_CHG_MAX": 15.0,  # Filter pump — saham naik >15% skip (profit taking!)
+    "NORMAL_CHG_MAX": 15.0,
     "VOL_AVG_PERIOD": 20,   "RSI_PERIOD": 14,         "ATR_PERIOD": 14,
     "MACD_FAST": 12,        "MACD_SLOW": 26,          "MACD_SIGNAL": 9,
     "BB_PERIOD": 20,        "BB_STD": 2.0,
     "MIN_VOLUME": 500_000,  "TOP_N": 10,              "REQUEST_DELAY": 0.3,
 
-    # ── Telegram (isi dengan data kamu) ──────────────────────
-    # Cara dapat token & chat_id: lihat panduan di README
     "TELEGRAM_TOKEN":   "8604469961:AAFk_K-EzJ6wiJp7oZoBQHVouwYmMOmEB1Y",
     "TELEGRAM_CHAT_ID": "5465692885",
 
-    # ── Auto-scheduler ────────────────────────────────────────
-    # Jam otomatis kirim sinyal setiap hari (format HH:MM WIB)
     "JADWAL_JAM":  "15:20",
-    # Mode default untuk auto-scheduler
     "AUTO_MODE":   "normal",
-    # Kirim notif juga kalau tidak ada sinyal kuat?
     "NOTIF_KOSONG": True,
 }
+
+CONFIG = {}
+
+def load_config():
+    global CONFIG
+    import os
+    if os.path.exists("config.json"):
+        try:
+            with open("config.json", "r") as f:
+                CONFIG = json.load(f)
+        except:
+            CONFIG = DEFAULT_CONFIG.copy()
+    else:
+        CONFIG = DEFAULT_CONFIG.copy()
+        save_config()
+
+def save_config():
+    with open("config.json", "w") as f:
+        json.dump(CONFIG, f, indent=4)
+
+load_config()
 
 # ═══════════════════════════════════════════════════════════════
 # INDIKATOR TEKNIKAL
@@ -665,10 +681,299 @@ def hitung_bollinger(closes):
     }
 
 
-def hitung_score(vspike, rsi, chg, macd_data, bb_data, vol_arah, candle,
-                 mode="normal", sentimen=None, whale=None):
+def hitung_mfi(df, period=14):
     """
-    Scoring v8.0 — 9 komponen (total 135 poin MAX)
+    Money Flow Index (MFI) — Volume-weighted RSI
+    ─────────────────────────────────────────────
+    MFI = RSI yang memperhitungkan volume.
+    Lebih akurat dari RSI biasa untuk deteksi tekanan beli/jual.
+
+    Formula:
+      Typical Price  = (High + Low + Close) / 3
+      Raw Money Flow = Typical Price x Volume
+      MFI = 100 - (100 / (1 + Positive MF / Negative MF))
+
+    Sinyal:
+      MFI < 20  -> Oversold (potensi rebound)
+      MFI > 80  -> Overbought (potensi koreksi)
+      Divergence: Harga naik + MFI turun = WARNING pump!
+    """
+    if len(df) < period + 5:
+        return {"mfi": 50, "status": "INSUFFICIENT", "label": "Data kurang",
+                "divergence": False, "aman": True, "skor": 0}
+
+    tp = (df["High"] + df["Low"] + df["Close"]) / 3
+    rmf = tp * df["Volume"]
+
+    tp_diff = tp.diff()
+    pos_mf = pd.Series(0.0, index=df.index)
+    neg_mf = pd.Series(0.0, index=df.index)
+    pos_mf[tp_diff > 0] = rmf[tp_diff > 0]
+    neg_mf[tp_diff < 0] = rmf[tp_diff < 0]
+
+    pos_sum = pos_mf.rolling(period).sum()
+    neg_sum = neg_mf.rolling(period).sum()
+
+    mfr = pos_sum / neg_sum.replace(0, 1e-10)
+    mfi_series = 100 - (100 / (1 + mfr))
+
+    mfi_now = float(mfi_series.iloc[-1])
+    mfi_prev = float(mfi_series.iloc[-2])
+
+    # Divergence: harga naik tapi MFI turun (warning pump!)
+    close_rising = float(df["Close"].iloc[-1]) > float(df["Close"].iloc[-5]) if len(df) >= 5 else False
+    mfi_falling = mfi_now < float(mfi_series.iloc[-5]) if len(df) >= 5 else False
+    divergence = close_rising and mfi_falling
+
+    if mfi_now < 20:
+        status, label = "OVERSOLD", "MFI Oversold (rebound?)"
+    elif mfi_now < 40:
+        status, label = "LOW", "MFI rendah"
+    elif mfi_now > 80:
+        status, label = "OVERBOUGHT", "MFI Overbought"
+    elif mfi_now > 65:
+        status, label = "HIGH", "MFI tinggi"
+    elif divergence:
+        status, label = "DIVERGENCE", "MFI Divergence (hati-hati)"
+    else:
+        status, label = "NETRAL", "MFI netral"
+
+    aman = status not in ("OVERBOUGHT", "DIVERGENCE")
+
+    return {
+        "mfi":        round(mfi_now, 1),
+        "mfi_prev":   round(mfi_prev, 1),
+        "status":     status,
+        "label":      label,
+        "divergence": divergence,
+        "aman":       aman,
+    }
+
+
+def hitung_obv(df, lookback=20):
+    """
+    On-Balance Volume (OBV) — Early Warning Akumulasi/Distribusi
+    ────────────────────────────────────────────────────────────
+    OBV naik sebelum harga = smart money mulai beli
+    OBV turun sebelum harga = smart money mulai jual
+
+    Sinyal:
+      CONFIRM_UP   : OBV naik + Harga naik  = tren naik valid
+      BULLISH_DIV  : OBV naik + Harga turun = akumulasi dini!
+      BEARISH_DIV  : OBV turun + Harga naik = distribusi dini!
+      CONFIRM_DOWN : OBV turun + Harga turun = tren turun valid
+    """
+    if len(df) < lookback + 5:
+        return {"obv_trend": "INSUFFICIENT", "label": "Data kurang",
+                "divergence_bullish": False, "divergence_bearish": False,
+                "aman": True, "skor": 0}
+
+    closes = df["Close"]
+    volumes = df["Volume"]
+
+    # Hitung OBV
+    obv_values = [0.0]
+    for i in range(1, len(df)):
+        if closes.iloc[i] > closes.iloc[i-1]:
+            obv_values.append(obv_values[-1] + float(volumes.iloc[i]))
+        elif closes.iloc[i] < closes.iloc[i-1]:
+            obv_values.append(obv_values[-1] - float(volumes.iloc[i]))
+        else:
+            obv_values.append(obv_values[-1])
+    obv = pd.Series(obv_values, index=df.index)
+
+    # OBV trend: SMA pendek vs SMA panjang
+    obv_sma5 = obv.rolling(5).mean()
+    obv_sma20 = obv.rolling(lookback).mean()
+
+    obv_trending_up = float(obv_sma5.iloc[-1]) > float(obv_sma20.iloc[-1])
+
+    # Price trend (5 hari terakhir)
+    price_up = float(closes.iloc[-1]) > float(closes.iloc[-5])
+
+    # Divergence detection
+    div_bullish = obv_trending_up and not price_up
+    div_bearish = not obv_trending_up and price_up
+
+    if obv_trending_up and price_up:
+        status, label = "CONFIRM_UP", "OBV konfirmasi naik"
+    elif div_bullish:
+        status, label = "BULLISH_DIV", "OBV akumulasi dini"
+    elif div_bearish:
+        status, label = "BEARISH_DIV", "OBV distribusi dini"
+    elif not obv_trending_up and not price_up:
+        status, label = "CONFIRM_DOWN", "OBV konfirmasi turun"
+    else:
+        status, label = "NETRAL", "OBV netral"
+
+    aman = status not in ("BEARISH_DIV", "CONFIRM_DOWN")
+
+    return {
+        "obv_trend":          status,
+        "label":              label,
+        "divergence_bullish": div_bullish,
+        "divergence_bearish": div_bearish,
+        "aman":               aman,
+    }
+
+
+def hitung_stoch_rsi(closes, rsi_period=14, stoch_period=14, k_period=3, d_period=3):
+    """
+    Stochastic RSI — RSI yang Lebih Sensitif
+    ──────────────────────────────────────────
+    Mengaplikasikan formula Stochastic ke RSI.
+    Hasilnya lebih cepat deteksi overbought/oversold.
+
+    Formula:
+      StochRSI = (RSI - min(RSI,14)) / (max(RSI,14) - min(RSI,14))
+      %K = SMA(StochRSI, 3) x 100
+      %D = SMA(%K, 3)
+
+    Sinyal:
+      %K < 20 + Cross %D = BUY signal kuat
+      %K > 80 + Cross %D = SELL signal
+      %K < 20 = Oversold (siap rebound)
+    """
+    min_needed = rsi_period + stoch_period + k_period + d_period + 5
+    if len(closes) < min_needed:
+        return {"k": 50, "d": 50, "status": "INSUFFICIENT",
+                "label": "Data kurang", "cross_up": False,
+                "cross_down": False, "aman": True}
+
+    # Hitung RSI series
+    delta = closes.diff().dropna()
+    gain = delta.clip(lower=0)
+    loss = (-delta.clip(upper=0))
+    avg_gain = gain.rolling(rsi_period, min_periods=rsi_period).mean()
+    avg_loss = loss.rolling(rsi_period, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi_s = 100 - (100 / (1 + rs))
+
+    # Stochastic of RSI
+    rsi_min = rsi_s.rolling(stoch_period).min()
+    rsi_max = rsi_s.rolling(stoch_period).max()
+    rsi_range = rsi_max - rsi_min
+    stoch_rsi = ((rsi_s - rsi_min) / rsi_range.replace(0, 1e-10)) * 100
+
+    k_line = stoch_rsi.rolling(k_period).mean()
+    d_line = k_line.rolling(d_period).mean()
+
+    k_now = float(k_line.iloc[-1])
+    k_prev = float(k_line.iloc[-2])
+    d_now = float(d_line.iloc[-1])
+    d_prev = float(d_line.iloc[-2])
+
+    cross_up = (k_prev <= d_prev) and (k_now > d_now)
+    cross_down = (k_prev >= d_prev) and (k_now < d_now)
+
+    if k_now < 20 and cross_up:
+        status, label = "BUY_SIGNAL", "StochRSI Buy Signal!"
+    elif k_now < 20:
+        status, label = "OVERSOLD", "StochRSI Oversold"
+    elif k_now > 80 and cross_down:
+        status, label = "SELL_SIGNAL", "StochRSI Sell Signal"
+    elif k_now > 80:
+        status, label = "OVERBOUGHT", "StochRSI Overbought"
+    elif cross_up:
+        status, label = "CROSS_UP", "StochRSI Cross Up"
+    elif k_now < 50:
+        status, label = "LOW", "StochRSI rendah"
+    else:
+        status, label = "HIGH", "StochRSI tinggi"
+
+    aman = status not in ("SELL_SIGNAL", "OVERBOUGHT")
+
+    return {
+        "k":          round(k_now, 1),
+        "d":          round(d_now, 1),
+        "status":     status,
+        "label":      label,
+        "cross_up":   cross_up,
+        "cross_down": cross_down,
+        "aman":       aman,
+    }
+
+
+def hitung_ema_cross(closes):
+    """
+    EMA Cross (EMA 5 vs EMA 20)
+    ─────────────────────────────
+    Mendeteksi perubahan tren jangka pendek secara cepat.
+    """
+    if len(closes) < 25:
+        return {"ema5": 0, "ema20": 0, "status": "INSUFFICIENT", "label": "Data kurang", "aman": True}
+
+    ema5 = closes.ewm(span=5, adjust=False).mean()
+    ema20 = closes.ewm(span=20, adjust=False).mean()
+    
+    ema5_now = float(ema5.iloc[-1])
+    ema5_prev = float(ema5.iloc[-2])
+    ema20_now = float(ema20.iloc[-1])
+    ema20_prev = float(ema20.iloc[-2])
+
+    golden_cross = (ema5_prev <= ema20_prev) and (ema5_now > ema20_now)
+    death_cross = (ema5_prev >= ema20_prev) and (ema5_now < ema20_now)
+    
+    if golden_cross:
+        status, label = "GOLDEN_CROSS", "EMA Golden Cross! 🌟"
+    elif ema5_now > ema20_now:
+        status, label = "BULLISH", "EMA Bullish 🟢"
+    elif death_cross:
+        status, label = "DEATH_CROSS", "EMA Death Cross 🚨"
+    else:
+        status, label = "BEARISH", "EMA Bearish 🔴"
+        
+    return {
+        "ema5": round(ema5_now, 2),
+        "ema20": round(ema20_now, 2),
+        "status": status,
+        "label": label,
+        "aman": status not in ("DEATH_CROSS", "BEARISH")
+    }
+
+
+def hitung_vwap(df):
+    """
+    VWAP Positioning (Weekly VWAP - 5 Periode)
+    ──────────────────────────────────────────
+    Volume Weighted Average Price untuk mendeteksi posisi akumulasi institusi.
+    """
+    if len(df) < 5 or "Volume" not in df.columns or df["Volume"].iloc[-1] == 0:
+        return {"vwap": 0, "status": "INSUFFICIENT", "label": "Data kurang", "pos_pct": 0, "aman": True}
+        
+    period = 5
+    tp = (df["High"] + df["Low"] + df["Close"]) / 3
+    vwap_vol = (tp * df["Volume"]).rolling(window=period).sum() / df["Volume"].rolling(window=period).sum()
+    
+    vwap_now = float(vwap_vol.iloc[-1])
+    close_now = float(df["Close"].iloc[-1])
+    
+    pos_pct = ((close_now - vwap_now) / vwap_now) * 100 if vwap_now > 0 else 0
+    
+    if pos_pct >= 3:
+        status, label = "STRONG_BULL", "Strong Bull > VWAP"
+    elif pos_pct > 0:
+        status, label = "BULLISH", "Di atas VWAP"
+    elif pos_pct < -3:
+        status, label = "STRONG_BEAR", "Strong Bear < VWAP"
+    else:
+        status, label = "BEARISH", "Di bawah VWAP"
+        
+    return {
+        "vwap": round(vwap_now, 2),
+        "status": status,
+        "label": label,
+        "pos_pct": round(pos_pct, 2),
+        "aman": status not in ("STRONG_BEAR", "BEARISH")
+    }
+
+
+def hitung_score(vspike, rsi, chg, macd_data, bb_data, vol_arah, candle,
+                 mode="normal", sentimen=None, whale=None,
+                 mfi_data=None, obv_data=None, stoch_data=None,
+                 ema_data=None, vwap_data=None):
+    """
+    Scoring v10.0 — 14 komponen (total 180 poin MAX)
     ─────────────────────────────────────────────────
     VSpike      : 28 poin  (volume anomali)
     RSI         : 18 poin  (momentum)
@@ -678,21 +983,21 @@ def hitung_score(vspike, rsi, chg, macd_data, bb_data, vol_arah, candle,
     Arah Volume :  7 poin  (akumulasi vs distribusi)
     Candlestick : 10 poin  (konfirmasi pola)
     Sentimen    : 20 poin  (berita katalis)
-    Whale Flow  : 15 poin  (aliran asing/institusi ← NEW v8.0)
+    Whale Flow  : 15 poin  (aliran asing/institusi)
+    MFI         : 10 poin  (money flow index ← NEW v9.0)
+    OBV         :  8 poin  (on-balance volume)
+    StochRSI    :  7 poin  (stochastic RSI)
+    EMA Cross   : 10 poin  (EMA 5 vs EMA 20 ← NEW v10.0)
+    VWAP        : 10 poin  (posisi harga vs VWAP ← NEW v10.0)
     ─────────────────────────────────────────────────
-    Total max   : 135 poin
-    Signal KUAT : >= 95 poin
-    Signal MODERAT: >= 68 poin
-
-    Kenapa whale flow penting untuk BSJP:
-    Asing/institusi beli = validasi bahwa smart money
-    melihat potensi naik. Whale inflow + BSJP signal
-    = probabilitas gap up besok pagi SANGAT tinggi!
+    Total max   : 180 poin
+    Signal KUAT : >= 126 poin (70%)
+    Signal MODERAT: >= 90 poin (50%)
     """
     score = 0
 
     # --- VSpike (28 poin) ---
-    thresh = {"safe":150,"normal":100,"aggressive":50}[mode]
+    thresh = {"safe":150,"normal":100,"gorengan":300}[mode]
     if   vspike >= thresh:        score += 28
     elif vspike >= thresh * 0.75: score += 18
     elif vspike >= thresh * 0.5:  score += 8
@@ -700,7 +1005,7 @@ def hitung_score(vspike, rsi, chg, macd_data, bb_data, vol_arah, candle,
     elif vspike >= 200: score += 3
 
     # --- RSI (18 poin) ---
-    rsi_max = {"safe":60,"normal":65,"aggressive":70}[mode]
+    rsi_max = {"safe":60,"normal":65,"gorengan":85}[mode]
     rsi_min = CONFIG["RSI_MIN"]
     if rsi_min < rsi <= rsi_max:
         score += int(18 * (1 - (rsi - rsi_min) / (rsi_max - rsi_min)))
@@ -778,22 +1083,92 @@ def hitung_score(vspike, rsi, chg, macd_data, bb_data, vol_arah, candle,
         # Tidak ada data IDX = netral, poin kecil
         score += 2
 
-    return min(score, 135)  # Max 135 poin
+    # --- MFI (10 poin max) ← NEW v9.0 ---
+    # Volume-weighted RSI — deteksi tekanan beli/jual lebih akurat
+    if mfi_data and mfi_data.get("status") != "INSUFFICIENT":
+        mfi_st = mfi_data["status"]
+        if mfi_st == "OVERSOLD":      score += 10  # Oversold = siap rebound
+        elif mfi_st == "LOW":         score += 7
+        elif mfi_st == "NETRAL":      score += 4
+        elif mfi_st == "HIGH":        score += 2
+        elif mfi_st == "OVERBOUGHT":  score += 0
+        elif mfi_st == "DIVERGENCE":  score -= 3   # Penalti divergence
+    else:
+        score += 3  # Data kurang = netral
+
+    # --- OBV (8 poin max) ← NEW v9.0 ---
+    # Early warning akumulasi/distribusi dari smart money
+    if obv_data and obv_data.get("obv_trend") != "INSUFFICIENT":
+        score += {
+            "CONFIRM_UP":   8,   # OBV + harga sama-sama naik
+            "BULLISH_DIV":  7,   # OBV naik, harga turun = akumulasi!
+            "NETRAL":       3,
+            "BEARISH_DIV":  0,   # OBV turun, harga naik = warning!
+            "CONFIRM_DOWN": 0,
+        }.get(obv_data["obv_trend"], 3)
+    else:
+        score += 2
+
+    # --- Stochastic RSI (7 poin max) ← NEW v9.0 ---
+    # RSI yang lebih sensitif untuk deteksi entry point
+    if stoch_data and stoch_data.get("status") != "INSUFFICIENT":
+        score += {
+            "BUY_SIGNAL":  7,   # Oversold + cross up = sinyal terkuat
+            "OVERSOLD":    6,
+            "CROSS_UP":    5,
+            "LOW":         4,
+            "HIGH":        2,
+            "OVERBOUGHT":  0,
+            "SELL_SIGNAL":  0,
+        }.get(stoch_data["status"], 2)
+    else:
+        score += 2
+
+    # --- EMA Cross (10 poin max) ← NEW v10.0 ---
+    if ema_data and ema_data.get("status") != "INSUFFICIENT":
+        score += {
+            "GOLDEN_CROSS": 10,
+            "BULLISH":       7,
+            "BEARISH":       0,
+            "DEATH_CROSS":   0,
+        }.get(ema_data["status"], 3)
+    else:
+        score += 3
+
+    # --- VWAP Positioning (10 poin max) ← NEW v10.0 ---
+    if vwap_data and vwap_data.get("status") != "INSUFFICIENT":
+        score += {
+            "STRONG_BULL": 10,
+            "BULLISH":      7,
+            "BEARISH":      0,
+            "STRONG_BEAR":  0,
+        }.get(vwap_data["status"], 3)
+    else:
+        score += 3
+
+    return min(score, 180)  # Max 180 poin
 
 
-def get_signal(score):
+def get_signal(score, defensive=False, mode="normal"):
     """
-    Signal threshold disesuaikan untuk max 135 poin
-    KUAT    : >= 95  (setara 70% dari 135)
-    MODERAT : >= 68  (setara 50% dari 135)
-    LEMAH   : < 68
+    Signal threshold dinamis untuk max 180 poin
+    Normal    : KUAT >= 126, MODERAT >= 90
+    Defensive : KUAT >= 135, MODERAT >= 100
+    Gorengan  : KUAT >= 100, MODERAT >= 75 (karena gorengan sering nol di foreign/MACD)
     """
-    if score >= 95:   return "KUAT   "
-    elif score >= 68: return "MODERAT"
+    if mode == "gorengan":
+        kuat_thresh = 100
+        moderat_thresh = 75
+    else:
+        kuat_thresh = 135 if defensive else 126
+        moderat_thresh = 100 if defensive else 90
+
+    if score >= kuat_thresh:  return "KUAT   "
+    elif score >= moderat_thresh: return "MODERAT"
     else:             return "LEMAH  "
 
 
-def hitung_range_besok(close, atr, vspike, rsi, chg, macd_data, bb_data):
+def hitung_range_besok(close, atr, vspike, rsi, chg, macd_data, bb_data, defensive=False):
     if atr == 0 or close == 0:
         return {"target_low": close, "target_mid": close,
                 "target_high": close, "arah": "SIDEWAYS",
@@ -837,9 +1212,14 @@ def hitung_range_besok(close, atr, vspike, rsi, chg, macd_data, bb_data):
     else:
         arah, conf = "SIDEWAYS", 50
 
+    if defensive:
+        gap_pct = max(gap_pct * 0.7, 0)
+        target_mid = round(close + (target_mid - close) * 0.7, 0)
+        target_high = round(close + (target_high - close) * 0.7, 0)
+
     return {"target_low": target_low, "target_mid": target_mid,
             "target_high": target_high, "arah": arah,
-            "confidence": conf, "gap_pct": gap_pct}
+            "confidence": conf, "gap_pct": round(gap_pct, 2)}
 
 
 def fmt_vol(v):
@@ -852,7 +1232,7 @@ def fmt_h(h): return f"{h:,.0f}".replace(",", ".")
 
 
 def hitung_panduan_trading(close: float, atr: float, score: int,
-                            vspike: float, sentimen: dict) -> dict:
+                            vspike: float, sentimen: dict, mode: str = "normal") -> dict:
     """
     Hitung panduan trading lengkap untuk BSJP
     ──────────────────────────────────────────
@@ -920,14 +1300,17 @@ def hitung_panduan_trading(close: float, atr: float, score: int,
     rr_ratio = round(reward / risk, 1) if risk > 0 else 0
 
     # ── Rekomendasi ──────────────────────────────────────────
-    if rr_ratio >= 2.5:
-        rr_label = "✅ Sangat Layak"
-    elif rr_ratio >= 1.5:
-        rr_label = "✅ Layak"
-    elif rr_ratio >= 1.0:
-        rr_label = "⚠️ Cukup"
+    if mode == "gorengan":
+        rr_label = "🔥 FAST TRADE! JANGAN DIINAPKAN (OVERNIGHT)!"
     else:
-        rr_label = "❌ Kurang Layak"
+        if rr_ratio >= 2.5:
+            rr_label = "✅ Sangat Layak"
+        elif rr_ratio >= 1.5:
+            rr_label = "✅ Layak"
+        elif rr_ratio >= 1.0:
+            rr_label = "⚠️ Cukup"
+        else:
+            rr_label = "❌ Kurang Layak"
 
     return {
         "beli_low":        beli_low,
@@ -1057,6 +1440,49 @@ def ambil_idx_stock_summary(force_refresh: bool = False) -> dict:
 
     print(f"  {Fore.YELLOW}[!] Gagal ambil data IDX - whale flow tidak tersedia{Style.RESET_ALL}")
     return {}
+
+
+def ambil_broker_summary(ticker: str) -> dict:
+    """
+    Fetch data Broker Summary untuk satu saham dari IDX API
+    Endpoint: /primary/TradingSummary/GetBrokerSummary
+    """
+    if not HAS_CURL_CFFI:
+        return {"error": "curl_cffi not installed"}
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-broker/",
+        "Accept": "application/json",
+    }
+
+    from datetime import datetime, timedelta
+    base_date = datetime.now()
+    dates_to_try = [(base_date - timedelta(days=i)).strftime("%Y%m%d") for i in range(5)]
+    url = "https://www.idx.co.id/primary/TradingSummary/GetBrokerSummary"
+
+    for date_str in dates_to_try:
+        try:
+            params = {"date": date_str, "stockCode": ticker, "start": "0", "length": "50"}
+            r = cf_requests.get(url, headers=headers, params=params, timeout=10, impersonate="chrome")
+            if r.status_code == 200:
+                data = r.json()
+                items = data.get("data", [])
+                if items:
+                    # Sort top buyer and seller
+                    buyers = sorted(items, key=lambda x: float(x.get("NetBuy", 0) or 0), reverse=True)
+                    sellers = sorted(items, key=lambda x: float(x.get("NetSell", 0) or 0), reverse=True)
+                    
+                    return {
+                        "status": "success",
+                        "date": date_str,
+                        "top_buyers": [{"broker": b.get("BrokerCode", ""), "net_buy": b.get("NetBuy", 0), "avg_price": b.get("BPrice", 0)} for b in buyers[:3] if float(b.get("NetBuy", 0) or 0) > 0],
+                        "top_sellers": [{"broker": s.get("BrokerCode", ""), "net_sell": s.get("NetSell", 0), "avg_price": s.get("SPrice", 0)} for s in sellers[:3] if float(s.get("NetSell", 0) or 0) > 0]
+                    }
+        except Exception:
+            continue
+            
+    return {"error": "Data broker tidak ditemukan"}
 
 
 def analisis_whale_flow(ticker: str, idx_cache: dict) -> dict:
@@ -1368,6 +1794,7 @@ def analisis_sentimen_berita(ticker: str, berita: list) -> dict:
         "berita_negatif": berita_negatif,
         "aman":           aman,
         "total_berita":   len(berita),
+        "berita_list":    berita,
     }
 
 
@@ -1424,7 +1851,7 @@ def telegram_kirim(pesan: str) -> bool:
 
 
 def format_pesan_telegram(results: list, mode: str,
-                           sentimen_cache: dict = None) -> str:
+                           sentimen_cache: dict = None, market_status: dict = None) -> str:
     """Format hasil screener jadi pesan Telegram lengkap dengan panduan trading"""
     top3 = sorted(results, key=lambda x: x["score"], reverse=True)[:3]
     tgl  = datetime.now().strftime("%d %b %Y %H:%M WIB")
@@ -1439,9 +1866,16 @@ def format_pesan_telegram(results: list, mode: str,
             f"Coba jalankan manual dengan mode AGGRESSIVE."
         )
 
+    cuaca_text = ""
+    if market_status:
+        cuaca_text = f"Cuaca IHSG: <b>{market_status['label']}</b>\n"
+        if market_status['defensive']:
+            cuaca_text += f"⚠️ <b>DEFENSIVE MODE:</b> Target dikurangi & threshold diperketat.\n"
+
     baris = [
-        f"📊 <b>BSJP Screener v8.0 — {tgl}</b>",
+        f"📊 <b>BSJP Screener v11.0 — {tgl}</b>",
         f"Mode: {mode.upper()} | {len(results)} saham lolos\n",
+        cuaca_text,
         f"⭐ <b>TOP 3 PICKS HARI INI:</b>\n",
     ]
 
@@ -1458,7 +1892,7 @@ def format_pesan_telegram(results: list, mode: str,
         # Info dasar saham
         baris.append(
             f"{medals[i]} <b>{r['ticker']}</b> [{r['sektor']}]  "
-            f"Score: <b>{r['score']}/135</b>\n"
+            f"Score: <b>{r['score']}/180</b>\n"
             f"   Close : {fmt_h(r['close'])} | Chg: +{r['chg']:.2f}%\n"
             f"   VSpike: {r['vspike']:.0f}% | RSI: {r['rsi']:.1f} | "
             f"{r['macd']['label']}\n"
@@ -1472,6 +1906,26 @@ def format_pesan_telegram(results: list, mode: str,
                 f"   🐋 Whale: {wh['label']}  "
                 f"(Net: {net_f_str}  F%: {wh.get('foreign_pct',0):.0f}%)\n"
             )
+
+        # NEW v10.0 indicators summary
+        mf = r.get("mfi", {})
+        ob = r.get("obv", {})
+        st = r.get("stoch", {})
+        em = r.get("ema", {})
+        vw = r.get("vwap", {})
+        ind_parts = []
+        if mf and mf.get("status") != "INSUFFICIENT":
+            ind_parts.append(f"MFI:{mf.get('mfi',0):.0f}")
+        if ob and ob.get("obv_trend") != "INSUFFICIENT":
+            ind_parts.append(ob['label'])
+        if st and st.get("status") != "INSUFFICIENT":
+            ind_parts.append(f"StochK:{st.get('k',0):.0f}")
+        if em and em.get("status") != "INSUFFICIENT":
+            ind_parts.append(em['label'])
+        if vw and vw.get("status") != "INSUFFICIENT":
+            ind_parts.append(vw['label'])
+        if ind_parts:
+            baris.append(f"   📈 {' | '.join(ind_parts)}\n")
 
         # Candle pattern
         if r["candle"]["ada_bullish"]:
@@ -1504,9 +1958,9 @@ def format_pesan_telegram(results: list, mode: str,
 
 
 def kirim_notif_telegram(results: list, mode: str,
-                          sentimen_cache: dict = None):
+                          sentimen_cache: dict = None, market_status: dict = None):
     """Kirim hasil screener ke Telegram"""
-    pesan = format_pesan_telegram(results, mode, sentimen_cache)
+    pesan = format_pesan_telegram(results, mode, sentimen_cache, market_status)
     if not pesan:
         return
     ok = telegram_kirim(pesan)
@@ -1641,6 +2095,52 @@ def mulai_scheduler():
         print(f"\n\n  {Fore.YELLOW}Scheduler dihentikan.{Style.RESET_ALL}\n")
 
 
+def analisis_ihsg_trend():
+    """
+    Analisis IHSG (^JKSE) untuk menentukan Cuaca Market (Market Breadth).
+    Returns dict status cuaca.
+    """
+    try:
+        ihsg = yf.Ticker("^JKSE").history(period="3mo", auto_adjust=True)
+        if ihsg.empty or len(ihsg) < 20:
+            return {"status": "NORMAL", "label": "Tidak bisa baca IHSG", "defensive": False, "chg_pct": 0}
+        
+        close_now = float(ihsg["Close"].iloc[-1])
+        close_prev = float(ihsg["Close"].iloc[-2])
+        chg_pct = (close_now - close_prev) / close_prev * 100
+        
+        ema20 = ihsg["Close"].ewm(span=20, adjust=False).mean()
+        ema20_now = float(ema20.iloc[-1])
+        
+        defensive = False
+        
+        if chg_pct < -0.8:
+            status = "CRASH"
+            label = f"IHSG CRASH! ({chg_pct:.2f}%) 🔴"
+            defensive = True
+        elif close_now < ema20_now and chg_pct < -0.3:
+            status = "BEARISH"
+            label = f"IHSG BEARISH ⚠️"
+            defensive = True
+        elif chg_pct < 0:
+            status = "SIDEWAYS"
+            label = f"IHSG MERAH TIPIS 🟡"
+        else:
+            status = "BULLISH"
+            label = f"IHSG BULLISH 🟢"
+            
+        return {
+            "status": status,
+            "label": label,
+            "defensive": defensive,
+            "chg_pct": chg_pct,
+            "ema20": ema20_now,
+            "close": close_now
+        }
+    except Exception as e:
+        return {"status": "NORMAL", "label": f"Gagal baca IHSG: {e}", "defensive": False, "chg_pct": 0}
+
+
 def ambil_data(ticker):
     try:
         df = yf.Ticker(f"{ticker}.JK").history(period="6mo", auto_adjust=True)
@@ -1649,7 +2149,7 @@ def ambil_data(ticker):
         return None
 
 
-def analisis_saham(ticker, mode, idx_cache=None):
+def analisis_saham(ticker, mode, idx_cache=None, market_status=None):
     df = ambil_data(ticker)
     if df is None:
         return None
@@ -1668,13 +2168,18 @@ def analisis_saham(ticker, mode, idx_cache=None):
     bb       = hitung_bollinger(closes)
     vol_arah = hitung_arah_volume(df)
     candle   = deteksi_candlestick(df)
+    mfi      = hitung_mfi(df)              # NEW v9.0
+    obv      = hitung_obv(df)              # NEW v9.0
+    stoch    = hitung_stoch_rsi(closes)    # NEW v9.0
+    ema      = hitung_ema_cross(closes)    # NEW v10.0
+    vwap     = hitung_vwap(df)             # NEW v10.0
 
     # Filter dasar
     if vol < CONFIG["MIN_VOLUME"]:  return None
     if chg < CONFIG["CHG_MIN"]:     return None
 
-    rsi_max = {"safe":60,"normal":65,"aggressive":70}[mode]
-    vs_min  = {"safe":150,"normal":100,"aggressive":50}[mode]
+    rsi_max = {"safe":60,"normal":65,"gorengan":85}[mode]
+    vs_min  = {"safe":150,"normal":100,"gorengan":300}[mode]
 
     if rsi > rsi_max or rsi < CONFIG["RSI_MIN"]: return None
     if vspike < vs_min * 0.5:                    return None
@@ -1705,15 +2210,30 @@ def analisis_saham(ticker, mode, idx_cache=None):
     if mode == "normal" and whale["status"] == "FOREIGN_DUMP":
         return None
 
+    # ── Filter MFI: overbought di mode safe → skip ───────────
+    if mode == "safe" and mfi["status"] == "OVERBOUGHT":
+        return None
+    # ── Filter OBV: bearish divergence di mode safe → skip ───
+    if mode == "safe" and obv.get("divergence_bearish"):
+        return None
+
+    defensive = market_status.get("defensive", False) if market_status else False
+    
     score  = hitung_score(vspike, rsi, chg, macd, bb, vol_arah, candle,
-                          mode, sentimen, whale)
-    signal = get_signal(score)
+                          mode, sentimen, whale, mfi, obv, stoch, ema, vwap)
+    signal = get_signal(score, defensive=defensive, mode=mode)
+    
+    if signal == "LEMAH  ":
+        return None
 
     # Hint — prioritas dari sinyal terkuat
     hint = "-"
     if vol_arah["distribusi_hari_ini"]:        hint = "DISTRIB🚨"
     elif whale["status"] == "WHALE_STRONG" and macd["status"] == "GOLDEN_CROSS":
                                                hint = "WHALE+GOLDEN💎"
+    elif ema["status"] == "GOLDEN_CROSS" and vwap["pos_pct"] > 0:
+                                               hint = "EMA G.CROSS+VWAP🚀"
+    elif vwap["status"] == "STRONG_BULL":      hint = "STRONG VWAP🐃"
     elif whale["status"] == "WHALE_STRONG":    hint = "WHALE🐋🔥"
     elif sentimen.get("skor", 0) >= 50 and macd["status"] == "GOLDEN_CROSS":
                                                hint = "GOLDEN+BERITA💎"
@@ -1734,11 +2254,16 @@ def analisis_saham(ticker, mode, idx_cache=None):
                                                hint = "AKUM+CANDLE💎"
     elif vspike >= 200 and chg >= 10:          hint = "MOMO🔥"
     elif candle["ada_bullish"]:                hint = candle["pola"][0] if candle["pola"] else "-"
+    elif ema["status"] == "GOLDEN_CROSS":      hint = "EMA G.CROSS🌟"
     elif rsi < 40 and chg > 3:                 hint = "AKUMULASI"
+    elif stoch["status"] == "BUY_SIGNAL":       hint = "STOCH BUY📊"
+    elif obv["divergence_bullish"]:             hint = "OBV AKUM📈"
+    elif mfi["status"] == "OVERSOLD":           hint = "MFI LOW💰"
+    elif vwap["status"] == "BULLISH":           hint = "> VWAP"
 
     sektor = SEKTOR.get(ticker, "Lainnya")
-    rng    = hitung_range_besok(close, atr, vspike, rsi, chg, macd, bb)
-    panduan = hitung_panduan_trading(close, atr, score, vspike, sentimen)
+    rng    = hitung_range_besok(close, atr, vspike, rsi, chg, macd, bb, defensive=defensive)
+    panduan = hitung_panduan_trading(close, atr, score, vspike, sentimen, mode)
 
     return {
         "ticker":   ticker,   "sektor":   sektor,
@@ -1748,7 +2273,10 @@ def analisis_saham(ticker, mode, idx_cache=None):
         "support":  sup,      "resistance": res,
         "macd":     macd,     "bb":       bb,
         "vol_arah": vol_arah, "candle":   candle,
-        "sentimen": sentimen, "whale":    whale,   # ← NEW v8.0
+        "sentimen": sentimen, "whale":    whale,
+        "mfi":      mfi,      "obv":      obv,      
+        "stoch":    stoch,    "ema":      ema,      # ← NEW v10.0
+        "vwap":     vwap,                           # ← NEW v10.0
         "panduan":  panduan,
         "score":    score,    "signal":   signal,
         "hint":     hint,     "range":    rng,
@@ -1760,8 +2288,8 @@ def analisis_saham(ticker, mode, idx_cache=None):
 
 def print_header():
     print(f"\n{Fore.CYAN}{Style.BRIGHT}{'═'*74}")
-    print(f"  BSJP SCREENER v8.0 — IHSG  |  +Whale Flow / Broker Summary")
-    print(f"  {datetime.now().strftime('%d %B %Y, %H:%M WIB')}  |  Watchlist: {len(WATCHLIST)} saham")
+    print(f"  BSJP SCREENER v10.0 — IHSG  |  +EMA Cross +VWAP")
+    print(f"  {datetime.now().strftime('%d %B %Y, %H:%M WIB')}  |  Watchlist: {len(WATCHLIST)} saham  |  14 indikator")
     print(f"{'═'*74}{Style.RESET_ALL}")
     wt = cek_waktu_scan()
     if wt["warna"] == "GREEN":
@@ -1798,7 +2326,7 @@ def print_results(results, mode):
     print(f"  {'─'*3} {'─'*7} {'─'*7} {'─'*7} {'─'*7} {'─'*5} {'─'*12} {'─'*5} {'─'*16}")
 
     for i, r in enumerate(top, 1):
-        c = Fore.GREEN+Style.BRIGHT if r["score"]>=85 else (Fore.YELLOW if r["score"]>=65 else Style.DIM)
+        c = Fore.GREEN+Style.BRIGHT if r["score"]>=100 else (Fore.YELLOW if r["score"]>=75 else Style.DIM)
         cc= Fore.GREEN if r["chg"]>0 else Fore.RED
         hc= Fore.MAGENTA if any(x in r["hint"] for x in ["GOLDEN","BREAKOUT","MOMO","WHALE"]) else Fore.CYAN
         # Whale label short
@@ -1916,6 +2444,37 @@ def print_macd_bb_detail(results):
             print(f"    Whale    : {whc}{wh['label']}{Style.RESET_ALL}  "
                   f"(Net Foreign: {net_f_str}  F%vol: {wh.get('foreign_pct',0):.0f}%  "
                   f"Buy:{fmt_vol(wh.get('foreign_buy',0))} Sell:{fmt_vol(wh.get('foreign_sell',0))})")
+        # MFI (NEW v9.0)
+        mf = r.get("mfi", {})
+        if mf and mf.get("status") != "INSUFFICIENT":
+            mfc = Fore.GREEN if mf.get("aman") else Fore.RED
+            div_txt = "  !! DIVERGENCE" if mf.get("divergence") else ""
+            print(f"    MFI      : {mfc}{mf['label']}{Style.RESET_ALL}  "
+                  f"(MFI: {mf.get('mfi',0):.0f}{div_txt})")
+        # OBV (NEW v9.0)
+        ob = r.get("obv", {})
+        if ob and ob.get("obv_trend") != "INSUFFICIENT":
+            obc = Fore.GREEN if ob.get("aman") else Fore.RED
+            print(f"    OBV      : {obc}{ob['label']}{Style.RESET_ALL}")
+        # StochRSI (NEW v9.0)
+        st = r.get("stoch", {})
+        if st and st.get("status") != "INSUFFICIENT":
+            stc = Fore.GREEN if st.get("aman") else Fore.RED
+            cross_txt = "  Cross Up!" if st.get("cross_up") else ""
+            print(f"    StochRSI : {stc}{st['label']}{Style.RESET_ALL}  "
+                  f"(%K:{st.get('k',0):.0f}  %D:{st.get('d',0):.0f}{cross_txt})")
+        # EMA Cross (NEW v10.0)
+        em = r.get("ema", {})
+        if em and em.get("status") != "INSUFFICIENT":
+            emc = Fore.GREEN if em.get("aman") else Fore.RED
+            print(f"    EMA Cross: {emc}{em['label']}{Style.RESET_ALL}  "
+                  f"(EMA5:{fmt_h(em.get('ema5',0))}  EMA20:{fmt_h(em.get('ema20',0))})")
+        # VWAP (NEW v10.0)
+        vw = r.get("vwap", {})
+        if vw and vw.get("status") != "INSUFFICIENT":
+            vwc = Fore.GREEN if vw.get("aman") else Fore.RED
+            print(f"    VWAP     : {vwc}{vw['label']}{Style.RESET_ALL}  "
+                  f"(VWAP:{fmt_h(vw.get('vwap',0))}  Pos:{vw.get('pos_pct',0):+.1f}%)")
         print(f"    Range    : {Fore.RED}{fmt_h(r['range']['target_low'])}{Style.RESET_ALL} – "
               f"{Fore.YELLOW}{fmt_h(r['range']['target_mid'])}{Style.RESET_ALL} – "
               f"{Fore.GREEN}{fmt_h(r['range']['target_high'])}{Style.RESET_ALL}  "
@@ -1944,6 +2503,8 @@ def print_top3(results):
         if r["bb"]["status"] == "BREAKOUT_UP":    reasons.append("BB Breakout🚀")
         elif r["bb"]["status"] == "SQUEEZE":      reasons.append("BB Squeeze⚡")
         elif r["bb"]["status"] == "LOWER_TOUCH":  reasons.append("BB Lower Touch")
+        if r.get("ema",{}).get("status") == "GOLDEN_CROSS": reasons.append("EMA Golden Cross🌟")
+        if r.get("vwap",{}).get("status") == "STRONG_BULL": reasons.append("Strong VWAP🐃")
 
         print(f"  {medals[i]} {Fore.GREEN}{Style.BRIGHT}{r['ticker']}{Style.RESET_ALL} "
               f"[{r['sektor']}]  Score:{r['score']}  "
@@ -1979,6 +2540,8 @@ def print_top3_dengan_sentimen(results, sentimen_cache=None):
         if r["bb"]["status"] == "BREAKOUT_UP":    reasons.append("BB Breakout🚀")
         elif r["bb"]["status"] == "SQUEEZE":      reasons.append("BB Squeeze⚡")
         if r["candle"]["ada_bullish"]:            reasons.append(r["candle"]["pola"][0])
+        if r.get("ema",{}).get("status") == "GOLDEN_CROSS": reasons.append("EMA Golden Cross🌟")
+        if r.get("vwap",{}).get("status") == "STRONG_BULL": reasons.append("Strong VWAP🐃")
 
         sentimen = sentimen_cache.get(r["ticker"]) if sentimen_cache else None
 
@@ -2037,6 +2600,19 @@ def simpan_csv(results, mode):
         "whale_net_foreign":r.get("whale",{}).get("net_foreign",0),
         "whale_foreign_pct":r.get("whale",{}).get("foreign_pct",0),
         "whale_skor":       r.get("whale",{}).get("skor",0),
+        "mfi_value":        r.get("mfi",{}).get("mfi",0),
+        "mfi_status":       r.get("mfi",{}).get("status","-"),
+        "mfi_divergence":   r.get("mfi",{}).get("divergence",False),
+        "obv_trend":        r.get("obv",{}).get("obv_trend","-"),
+        "stoch_k":          r.get("stoch",{}).get("k",0),
+        "stoch_d":          r.get("stoch",{}).get("d",0),
+        "stoch_status":     r.get("stoch",{}).get("status","-"),
+        "stoch_cross_up":   r.get("stoch",{}).get("cross_up",False),
+        "ema_status":       r.get("ema",{}).get("status","-"),
+        "ema_5":            r.get("ema",{}).get("ema5",0),
+        "ema_20":           r.get("ema",{}).get("ema20",0),
+        "vwap_status":      r.get("vwap",{}).get("status","-"),
+        "vwap_pos_pct":     r.get("vwap",{}).get("pos_pct",0),
         "score": r["score"], "signal": r["signal"].strip(), "hint": r["hint"],
         "est_low": r["range"]["target_low"],
         "est_mid": r["range"]["target_mid"],
@@ -2060,17 +2636,32 @@ def run_all_modes():
     all_res = {}
     ticker_count = {}
     idx_cache = ambil_idx_stock_summary()  # Fetch IDX data sekali
-    for mode in ["safe","normal","aggressive"]:
+    
+    market_status = analisis_ihsg_trend()
+    print(f"\n{Fore.CYAN}{'═'*74}{Style.RESET_ALL}")
+    print(f"  {Style.BRIGHT}Cuaca IHSG: {market_status['label']}{Style.RESET_ALL}")
+    if market_status['defensive']:
+        print(f"  {Fore.RED}⚠ DEFENSIVE MODE AKTIF! Filter dan target range diperketat.{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}{'═'*74}{Style.RESET_ALL}")
+    
+    for mode in ["safe","normal","gorengan"]:
         print(f"\n  {Fore.YELLOW}━━━ Mode: {mode.upper()} ━━━{Style.RESET_ALL}")
         results = []
-        for idx, ticker in enumerate(WATCHLIST):
-            print_progress(idx+1, len(WATCHLIST), ticker)
-            r = analisis_saham(ticker, mode, idx_cache)
+        
+        scan_list = WATCHLIST
+        if mode == "gorengan" and idx_cache:
+            sorted_aktif = sorted(idx_cache.items(), key=lambda x: x[1].get("volume", 0), reverse=True)
+            g_list = [k for k, v in sorted_aktif[:250]]
+            scan_list = list(set(WATCHLIST + g_list))
+
+        for idx, ticker in enumerate(scan_list):
+            print_progress(idx+1, len(scan_list), ticker)
+            r = analisis_saham(ticker, mode, idx_cache, market_status)
             if r:
                 results.append(r)
                 ticker_count[ticker] = ticker_count.get(ticker, 0) + 1
             time.sleep(CONFIG["REQUEST_DELAY"])
-        print(f"\r  Selesai — {len(results)} lolos{' '*40}")
+        print(f"\r  Selesai — {len(results)} lolos dari {len(scan_list)}{' '*20}")
         all_res[mode] = results
         print_results(results, mode)
 
@@ -2092,7 +2683,6 @@ def run_all_modes():
     print_sektor_summary(norm)
     print_macd_bb_detail(norm)
     print_top3(norm)
-    print_disclaimer()
     simpan_csv(norm, "all_modes")
 
 
@@ -2120,7 +2710,7 @@ def main():
     print(f"  {Style.BRIGHT}Pilih mode:{Style.RESET_ALL}")
     print(f"  1. {Fore.GREEN}SAFE{Style.RESET_ALL}       (VSpike>150%, RSI<60, filter ketat)")
     print(f"  2. {Fore.YELLOW}NORMAL{Style.RESET_ALL}     (VSpike>100%, RSI<65) ← Recommended")
-    print(f"  3. {Fore.RED}AGGRESSIVE{Style.RESET_ALL} (VSpike>50%,  RSI<70)")
+    print(f"  3. {Fore.RED}GORENGAN{Style.RESET_ALL}   (VSpike>300%, RSI<85) ← Khusus Fast Trade")
     print(f"  4. {Fore.CYAN}ALL MODES{Style.RESET_ALL}  (Semua + Global Picks)")
     print(f"  5. {Fore.MAGENTA}AUTO{Style.RESET_ALL}       (Scheduler otomatis + Telegram) ← NEW v6.0")
     print(f"  6. {Fore.WHITE}TEST{Style.RESET_ALL}       (Test koneksi Telegram saja)\n")
@@ -2145,10 +2735,10 @@ def main():
         run_all_modes()
         return
 
-    mode  = {"1":"safe","3":"aggressive"}.get(pilihan,"normal")
-    color = {"safe":Fore.GREEN,"normal":Fore.YELLOW,"aggressive":Fore.RED}[mode]
-    vs    = {"safe":150,"normal":100,"aggressive":50}[mode]
-    rm    = {"safe":60,"normal":65,"aggressive":70}[mode]
+    mode  = {"1":"safe","3":"gorengan"}.get(pilihan,"normal")
+    color = {"safe":Fore.GREEN,"normal":Fore.YELLOW,"gorengan":Fore.RED}[mode]
+    vs    = {"safe":150,"normal":100,"gorengan":300}[mode]
+    rm    = {"safe":60,"normal":65,"gorengan":85}[mode]
 
     # Tanya apakah mau analisis sentimen
     print(f"\n  Mode: {color}{Style.BRIGHT}{mode.upper()}{Style.RESET_ALL}"
@@ -2161,18 +2751,36 @@ def main():
 
     print(f"\n  {Fore.YELLOW}Scanning {len(WATCHLIST)} saham...{Style.RESET_ALL}\n")
 
+    market_status = analisis_ihsg_trend()
+    print(f"  {Style.BRIGHT}Cuaca IHSG: {market_status['label']}{Style.RESET_ALL}")
+    if market_status['defensive']:
+        print(f"  {Fore.RED}⚠ DEFENSIVE MODE AKTIF! Filter lebih ketat.{Style.RESET_ALL}")
+
     results, errors = [], 0
     idx_cache = ambil_idx_stock_summary()  # Fetch IDX data sekali
-    for idx, ticker in enumerate(WATCHLIST):
-        print_progress(idx+1, len(WATCHLIST), ticker)
+
+    # 🔥 Dynamic Watchlist untuk Gorengan
+    scan_list = WATCHLIST
+    if mode == "gorengan" and idx_cache:
+        print(f"  {Fore.YELLOW}Mengekspansi radar ke Top 250 Saham Teraktif IDX...{Style.RESET_ALL}")
+        # Karena data IDX delay 1 hari, kita ambil 250 saham dengan volume terbesar kemarin
+        # Gorengan yang sedang manggung hari ini biasanya juga aktif kemarin
+        sorted_aktif = sorted(idx_cache.items(), key=lambda x: x[1].get("volume", 0), reverse=True)
+        g_list = [k for k, v in sorted_aktif[:250]]
+        scan_list = list(set(WATCHLIST + g_list))
+
+    print(f"\n  {Fore.YELLOW}Scanning {len(scan_list)} saham...{Style.RESET_ALL}\n")
+
+    for idx, ticker in enumerate(scan_list):
+        print_progress(idx+1, len(scan_list), ticker)
         try:
-            r = analisis_saham(ticker, mode, idx_cache)
+            r = analisis_saham(ticker, mode, idx_cache, market_status)
             if r: results.append(r)
         except Exception:
             errors += 1
         time.sleep(CONFIG["REQUEST_DELAY"])
 
-    print(f"\r  Scan selesai! {len(results)} lolos dari {len(WATCHLIST)} ({errors} error){' '*20}")
+    print(f"\r  Scan selesai! {len(results)} lolos dari {len(scan_list)} ({errors} error){' '*20}")
 
     # Analisis sentimen untuk top 5
     sentimen_cache = {}
@@ -2191,7 +2799,6 @@ def main():
     print_sektor_summary(results)
     print_macd_bb_detail(results)
     print_top3_dengan_sentimen(results, sentimen_cache)
-    print_disclaimer()
     simpan_csv(results, mode)
 
     # Tanya kirim Telegram
@@ -2199,7 +2806,7 @@ def main():
         try:
             kirim = input("\n  Kirim hasil ke Telegram? (y/n, default=y): ").strip().lower()
             if kirim != "n":
-                kirim_notif_telegram(results, mode, sentimen_cache)
+                kirim_notif_telegram(results, mode, sentimen_cache, market_status)
         except (EOFError, KeyboardInterrupt):
             pass
 
