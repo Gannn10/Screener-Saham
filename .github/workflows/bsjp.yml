@@ -34,6 +34,18 @@ jobs:
         run: |
           python bsjp_auto.py
 
+      - name: Commit & Push screener_history.csv
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          if [ -f screener_history.csv ]; then
+            git add screener_history.csv
+            git diff --staged --quiet || git commit -m "Auto update screener_history.csv [skip ci]"
+            git push
+          else
+            echo "Tidak ada file screener_history.csv, skip commit."
+          fi
+
       - name: Upload CSV ke artifact
         uses: actions/upload-artifact@v4
         with:

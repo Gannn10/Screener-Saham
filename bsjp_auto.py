@@ -54,6 +54,10 @@ def main():
     print(f"  {datetime.now().strftime('%d %B %Y %H:%M WIB')}")
     print(f"{'='*60}\n")
 
+    print("  Mengambil Cuaca IHSG...")
+    market_status = screener.analisis_ihsg_trend()
+    print(f"  Cuaca IHSG: {market_status['label']}")
+
     # Kirim notif mulai
     screener.telegram_kirim(
         f"🤖 <b>BSJP Auto-Scan dimulai</b>\n"
@@ -78,7 +82,7 @@ def main():
         bar = "█" * pct + "░" * (40-pct)
         print(f"\r  [{bar}] {idx+1}/{total} {ticker:<8}", end="", flush=True)
         try:
-            r = screener.analisis_saham(ticker, mode, idx_cache)
+            r = screener.analisis_saham(ticker, mode, idx_cache, market_status)
             if r:
                 results.append(r)
         except Exception:
@@ -114,8 +118,22 @@ def main():
     # Simpan CSV sebagai artifact
     screener.simpan_csv(results, mode)
 
+    # --- Phase 1: Menyimpan ke screener_history.csv ---
+    if results:
+        history_file = "screener_history.csv"
+        df_history = pd.DataFrame(results)
+        
+        if 'tanggal' not in df_history.columns:
+            df_history.insert(0, 'tanggal', datetime.now().strftime("%Y-%m-%d"))
+        if 'jam' not in df_history.columns:
+            df_history.insert(1, 'jam', datetime.now().strftime("%H:%M"))
+            
+        file_exists = os.path.isfile(history_file)
+        df_history.to_csv(history_file, mode='a', header=not file_exists, index=False)
+        print(f"  [+] History berhasil diupdate: {len(df_history)} baris ke {history_file}")
+
     # Kirim ke Telegram
-    screener.kirim_notif_telegram(results, mode, sentimen_cache)
+    screener.kirim_notif_telegram(results, mode, sentimen_cache, market_status)
 
     print(f"\n  {'='*50}")
     print(f"  Auto-scan selesai!")
