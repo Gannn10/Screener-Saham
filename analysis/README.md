@@ -1,4 +1,5 @@
-# 📊 Portofolio Analisis Data Saham BSJP (Tableau Dashboard)
+# 📊 Portofolio Analisis Data Saham BSJP
+# Data Yang Digunakan Data Hasil Selama 1 Bulan 
 
 Dokumentasi ini merangkum hasil analisis data historis hasil screening saham menggunakan strategi **BSJP (Beli Sore Jual Pagi)**. Data dianalisis dan divisualisasikan menggunakan **Tableau** untuk menemukan pola, tren sektor, dan saham teraktif.
 
