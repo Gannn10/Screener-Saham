@@ -2,7 +2,7 @@ name: BSJP Auto Screener
 
 on:
   schedule:
-    - cron: '20 8 * * 1-5'
+    - cron: '45 7 * * 1-5'
     - cron: '30 2 * * 2-6'
   workflow_dispatch:
 
@@ -10,7 +10,7 @@ jobs:
   screening:
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event.schedule == '20 8 * * 1-5'
+      github.event.schedule == '45 7 * * 1-5'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
