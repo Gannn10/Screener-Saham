@@ -5,9 +5,15 @@ Dokumentasi ini merangkum hasil analisis data historis hasil screening saham men
 ---
 
 ## 📌 Ringkasan Eksekutif (KPI Dashboard)
-Secara keseluruhan, terdapat **74 saham aktif** yang masuk dalam radar screener selama periode analisis ini.
+Secara keseluruhan, terdapat **74 saham aktif** yang masuk dalam radar screener selama periode analisis ini. Dashboard dirancang dalam dua visualisasi utama untuk mempermudah analisis:
 
-![KPI Dashboard Saham Aktif](tableau/05_kpi_dashboard.png)
+### A. Tampilan Berdasarkan Volume Transaksi
+Menampilkan visualisasi *Top 10 Saham* berdasarkan volume perdagangan guna menilai likuiditas pasar.
+![KPI Dashboard Saham Aktif - Volume](tableau/05_kpi_dashboard.png)
+
+### B. Tampilan Berdasarkan Jumlah Sinyal
+Menampilkan visualisasi *Top 10 Saham* berdasarkan banyaknya indikator teknikal/rumus BSJP yang terpenuhi (sinyal beli).
+![KPI Dashboard Saham Aktif - Jumlah Sinyal](tableau/07_kpi_dashboard_sinyal.png)
 
 ---
 
@@ -56,6 +62,13 @@ Grafik ini menunjukkan jumlah kriteria sinyal beli BSJP yang berhasil dipenuhi o
 * **Insight Utama**:
   * **MBMA** menjadi pilihan terkuat dengan mengumpulkan **5 Sinyal Kekuatan** sekaligus (*Strong Signal*).
   * Emiten lain seperti **TBIG, SMGR, NICE, HRUM, BREN, BIPI,** dan **ACES** memiliki **4 Sinyal** (*Medium Signal*), menjadikannya kandidat kuat untuk strategi Beli Sore Jual Pagi.
+
+---
+
+### 5. Interaktivitas Dashboard (Detail Pilihan Saham / Drill-down)
+Dashboard ini memiliki fitur interaktif penuh. Saat pengguna memilih salah satu emiten teratas (misalnya saham **BREN** di bawah ini), seluruh metrik, ringkasan sektor, dan peta pasar akan terfilter secara dinamis untuk fokus pada emiten terpilih.
+
+![Interaktivitas Detail Saham](tableau/06_top_pick_detail.png)
 
 ---
 
