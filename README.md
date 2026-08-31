@@ -14,10 +14,10 @@ Project ini dirancang untuk mempermudah analisis data pergerakan saham harian da
 ## 📊 Portofolio Analisis Data (Tableau Dashboard)
 
 Telah dilakukan analisis data historis terhadap aktivitas bot screener ini menggunakan **Tableau Dashboard**. Laporan lengkap visualisasi data ini dapat diakses di:
-* 👉 **[Laporan Lengkap Analisis Data Tableau](file:///d:/bot/web%20saham/analysis/README.md)**
+* 👉 **[Laporan Lengkap Analisis Data Tableau](analysis/README.md)**
 
 ### Visualisasi Singkat (Market Map & KPI)
-![KPI Dashboard Saham Aktif](file:///d:/bot/web%20saham/analysis/tableau/05_kpi_dashboard.png)
+![KPI Dashboard Saham Aktif](analysis/tableau/05_kpi_dashboard.png)
 
 ---
 
