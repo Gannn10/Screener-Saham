@@ -11,6 +11,16 @@ Project ini dirancang untuk mempermudah analisis data pergerakan saham harian da
 * **Auto-Execution (`bsjp_auto.py`)**: Script utama untuk menjalankan alur otomatisasi harian.
 * **GitHub Actions Integration (`.github/workflows/bsjp.yml`)**: Workflow CI/CD yang dikonfigurasi untuk menjalankan *screener* dan *tracker* secara berkala (Cron Job) tanpa harus menyalakan komputer/server lokal.
 
+## 📊 Portofolio Analisis Data (Tableau Dashboard)
+
+Telah dilakukan analisis data historis terhadap aktivitas bot screener ini menggunakan **Tableau Dashboard**. Laporan lengkap visualisasi data ini dapat diakses di:
+* 👉 **[Laporan Lengkap Analisis Data Tableau](file:///d:/bot/web%20saham/analysis/README.md)**
+
+### Visualisasi Singkat (Market Map & KPI)
+![KPI Dashboard Saham Aktif](file:///d:/bot/web%20saham/analysis/tableau/05_kpi_dashboard.png)
+
+---
+
 ## 🛠️ Persyaratan (Prerequisites)
 
 Pastikan kamu sudah menginstal *dependencies* berikut sebelum menjalankan script secara lokal:
