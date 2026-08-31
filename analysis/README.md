@@ -73,5 +73,11 @@ Dashboard ini memiliki fitur interaktif penuh. Saat pengguna memilih salah satu 
 
 ---
 
+## 🛠️ Fitur & Teknik Tableau yang Digunakan
+* **Dynamic Parameter & Switch Metric:** Menggunakan Parameter & Calculated Field dinamis untuk menukar tampilan antara *Volume Transaksi* dan *Jumlah Sinyal*.
+* **Calculated Fields & Custom Grouping:** Algoritma pewarnaan otomatis (*Strong Signal*, *Medium Signal*, *Watchlist*) berbasis kondisi logika.
+* **KPI Card Integration:** Pembuatan *sheet KPI* dengan teknik *Distinct Count (CNTD)* untuk merekap emiten unik.
+* **Interactive Dashboard Actions:** Filter dinamis antar visualisasi saat emiten atau sektor diklik oleh pengguna.
+
 ## 💡 Kesimpulan Portofolio
 Dari hasil analisis Tableau ini, saham yang paling potensial untuk difokuskan dalam strategi BSJP adalah saham-saham di sektor **Energi dan Tambang (seperti MBMA dan BIPI)** karena kombinasi volume likuiditas yang tebal dan kekuatan sinyal teknikal yang sangat matang.
